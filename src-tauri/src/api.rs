@@ -75,7 +75,7 @@ fn cache_set<T: Clone>(cache: &Mutex<HashMap<String, CacheEntry<T>>>, key: Strin
 
 // --- Types ---
 #[derive(Serialize, Deserialize, Clone)]
-pub struct AnimeResult { pub id: String, pub name: String, pub episodes: u32, pub thumbnail: String, pub rating: f64 }
+pub struct AnimeResult { pub id: String, pub name: String, pub episodes: u32, pub thumbnail: String, pub rating: f64, #[serde(default)] pub mal_id: u64 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct EpisodeLink { pub quality: String, pub url: String }
@@ -192,7 +192,7 @@ pub async fn search_anime(query: String, mode: String, country: Option<String>, 
 
     if let Some(cached) = cache_valid(&cache.search, &cache_key) { return Ok(cached); }
 
-    let search_gql = r#"query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name thumbnail score availableEpisodes __typename } }}"#;
+    let search_gql = r#"query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name thumbnail score malId availableEpisodes __typename } }}"#;
 
     let body = serde_json::json!({
         "variables": {
@@ -220,8 +220,9 @@ pub async fn search_anime(query: String, mode: String, country: Option<String>, 
                 let episodes = edge.pointer(&format!("/availableEpisodes/{}", mode))
                     .and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let rating = edge.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let mal_id = edge.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                 if episodes > 0 {
-                    results.push(AnimeResult { id, name, episodes, thumbnail, rating });
+                    results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id });
                 }
             }
         }
@@ -335,12 +336,12 @@ pub async fn get_episode_url(show_id: String, episode: String, mode: String, qua
         }
     }
 
-    // Fallback to Consumet if AllAnime returned nothing
+    // Fallback to Gogoanime if AllAnime returned nothing
     if all_links.is_empty() {
         let search_title = title.unwrap_or_else(|| show_id.clone());
-        let consumet_sources = crate::consumet::get_consumet_sources(&search_title, &episode).await;
-        let fallback: Vec<EpisodeLink> = consumet_sources.into_iter()
-            .map(|s| EpisodeLink { quality: format!("consumet-{}", s.quality), url: s.url })
+        let gogo_sources = crate::consumet::get_fallback_sources(&search_title, &episode).await;
+        let fallback: Vec<EpisodeLink> = gogo_sources.into_iter()
+            .map(|s| EpisodeLink { quality: format!("gogo-{}", s.quality), url: s.url })
             .collect();
         if !fallback.is_empty() {
             cache_set(&cache.links, cache_key, fallback.clone());
@@ -414,13 +415,14 @@ pub async fn get_anime_details(show_id: String) -> Result<AnimeDetails, String> 
 }
 
 #[tauri::command]
-pub async fn get_popular(mode: String, cache: State<'_, AppCache>) -> Result<Vec<AnimeResult>, String> {
+pub async fn get_popular(mode: String, page: Option<u32>, cache: State<'_, AppCache>) -> Result<Vec<AnimeResult>, String> {
     let mode = if mode == "dub" { "dub" } else { "sub" };
-    let cache_key = format!("popular:{}", mode);
+    let pg = page.unwrap_or(1);
+    let cache_key = format!("popular:{}:{}", mode, pg);
     if let Some(cached) = cache_valid(&cache.search, &cache_key) { return Ok(cached); }
 
-    let gql = r#"query( $type: VaildShowObjectEnumType $page: Int $limit: Int $translationType: VaildTranslationTypeEnumType ) { queryPopular( type: $type page: $page limit: $limit translationType: $translationType ) { recommendations { anyCard { _id name thumbnail score availableEpisodes } } }}"#;
-    let body = serde_json::json!({"variables": {"type": "anime", "page": 1, "limit": 20, "translationType": mode}, "query": gql});
+    let gql = r#"query( $type: VaildShowObjectEnumType $page: Int $limit: Int $translationType: VaildTranslationTypeEnumType ) { queryPopular( type: $type page: $page limit: $limit translationType: $translationType ) { recommendations { anyCard { _id name thumbnail score malId availableEpisodes } } }}"#;
+    let body = serde_json::json!({"variables": {"type": "anime", "page": pg, "limit": 40, "translationType": mode}, "query": gql});
 
     let client = build_client();
     let resp = client.post(format!("{}/api", allanime_api()))
@@ -437,8 +439,9 @@ pub async fn get_popular(mode: String, cache: State<'_, AppCache>) -> Result<Vec
                     let name = card.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                     let thumbnail = card.get("thumbnail").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                     let rating = card.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let mal_id = card.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                     let episodes = card.pointer(&format!("/availableEpisodes/{}", mode)).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    if !id.is_empty() { results.push(AnimeResult { id, name, episodes, thumbnail, rating }); }
+                    if !id.is_empty() { results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id }); }
                 }
             }
         }
@@ -448,13 +451,14 @@ pub async fn get_popular(mode: String, cache: State<'_, AppCache>) -> Result<Vec
 }
 
 #[tauri::command]
-pub async fn get_recently_updated(mode: String, cache: State<'_, AppCache>) -> Result<Vec<AnimeResult>, String> {
+pub async fn get_recently_updated(mode: String, page: Option<u32>, cache: State<'_, AppCache>) -> Result<Vec<AnimeResult>, String> {
     let mode = if mode == "dub" { "dub" } else { "sub" };
-    let cache_key = format!("recent:{}", mode);
+    let pg = page.unwrap_or(1);
+    let cache_key = format!("recent:{}:{}", mode, pg);
     if let Some(cached) = cache_valid(&cache.search, &cache_key) { return Ok(cached); }
 
-    let gql = r#"query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name thumbnail score availableEpisodes __typename } }}"#;
-    let body = serde_json::json!({"variables": {"search": {"allowAdult": false, "allowUnknown": false, "query": ""}, "limit": 20, "page": 1, "translationType": mode, "countryOrigin": "ALL"}, "query": gql});
+    let gql = r#"query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name thumbnail score malId availableEpisodes __typename } }}"#;
+    let body = serde_json::json!({"variables": {"search": {"allowAdult": false, "allowUnknown": false, "query": ""}, "limit": 40, "page": pg, "translationType": mode, "countryOrigin": "ALL"}, "query": gql});
 
     let client = build_client();
     let resp = client.post(format!("{}/api", allanime_api()))
@@ -470,8 +474,9 @@ pub async fn get_recently_updated(mode: String, cache: State<'_, AppCache>) -> R
                 let name = edge.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 let thumbnail = edge.get("thumbnail").and_then(|v| v.as_str()).unwrap_or_default().to_string();
                 let rating = edge.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let mal_id = edge.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                 let episodes = edge.pointer(&format!("/availableEpisodes/{}", mode)).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                if episodes > 0 { results.push(AnimeResult { id, name, episodes, thumbnail, rating }); }
+                if episodes > 0 { results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id }); }
             }
         }
     }
@@ -570,4 +575,34 @@ pub async fn debug_episode_url(show_id: String, episode: String, mode: String) -
     }
 
     Ok(info)
+}
+
+#[tauri::command]
+pub async fn get_thumbnail_fallback(name: String, mal_id: Option<u64>) -> Result<String, String> {
+    let client = build_client();
+    // If we have MAL ID, use it directly (faster, more accurate)
+    if let Some(id) = mal_id {
+        if id > 0 {
+            let url = format!("https://api.jikan.moe/v4/anime/{}", id);
+            if let Ok(resp) = client.get(&url).send().await {
+                if let Ok(text) = resp.text().await {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if let Some(img) = json.pointer("/data/images/jpg/large_image_url").and_then(|v| v.as_str()) {
+                            return Ok(img.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: search by name
+    let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=1", urlencoding::encode(&name));
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?
+        .text().await.map_err(|e| e.to_string())?;
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
+        if let Some(img) = json.pointer("/data/0/images/jpg/large_image_url").and_then(|v| v.as_str()) {
+            return Ok(img.to_string());
+        }
+    }
+    Err("No thumbnail found".to_string())
 }
