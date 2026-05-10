@@ -77,9 +77,10 @@ pub async fn anilist_seasonal(season: String, year: u32) -> Result<Vec<AniListMe
 }
 
 #[tauri::command]
-pub async fn anilist_search(query_str: String, genre: Option<String>, year: Option<u32>, season: Option<String>, sort: Option<String>, format: Option<String>) -> Result<Vec<AniListMedia>, String> {
+pub async fn anilist_search(query_str: String, genre: Option<String>, year: Option<u32>, season: Option<String>, sort: Option<String>, format: Option<String>, page: Option<u32>) -> Result<Vec<AniListMedia>, String> {
     let mut filters = vec!["type:ANIME".to_string()];
     let mut vars = serde_json::Map::new();
+    let pg = page.unwrap_or(1);
 
     if !query_str.is_empty() { filters.push("search:$q".to_string()); vars.insert("q".to_string(), serde_json::json!(query_str)); }
     if let Some(g) = genre { filters.push("genre:$g".to_string()); vars.insert("g".to_string(), serde_json::json!(g)); }
@@ -97,7 +98,7 @@ pub async fn anilist_search(query_str: String, genre: Option<String>, year: Opti
     }).filter(|s| !s.is_empty()).collect();
 
     let var_def_str = if var_defs.is_empty() { String::new() } else { format!("({})", var_defs.join(",")) };
-    let gql = format!("query{} {{ Page(page:1,perPage:30) {{ media({}) {{ {} }} }} }}", var_def_str, filters.join(","), MEDIA_FIELDS);
+    let gql = format!("query{} {{ Page(page:{},perPage:50) {{ media({}) {{ {} }} }} }}", var_def_str, pg, filters.join(","), MEDIA_FIELDS);
 
     let resp = query(&gql, serde_json::Value::Object(vars)).await?;
     Ok(resp.pointer("/data/Page/media").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(parse_media).collect()).unwrap_or_default())

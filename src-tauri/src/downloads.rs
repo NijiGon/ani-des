@@ -17,9 +17,13 @@ pub struct DownloadItem {
     pub episode: String,
     pub mode: String,
     pub status: DownloadStatus,
-    pub progress: f64, // 0-100
+    pub progress: f64,
     pub file_path: String,
     pub error: Option<String>,
+    #[serde(default)]
+    pub downloaded_bytes: u64,
+    #[serde(default)]
+    pub total_bytes: u64,
 }
 
 pub struct DownloadManager {
@@ -27,9 +31,28 @@ pub struct DownloadManager {
     pub cancel_tx: Arc<Mutex<HashMap<String, mpsc::Sender<()>>>>,
 }
 
+fn downloads_db_path() -> PathBuf {
+    let dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("ani-des");
+    fs::create_dir_all(&dir).ok();
+    dir.join("downloads.json")
+}
+
+fn load_downloads() -> Vec<DownloadItem> {
+    fs::read_to_string(downloads_db_path()).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn persist_downloads(items: &[DownloadItem]) {
+    if let Ok(json) = serde_json::to_string_pretty(items) {
+        fs::write(downloads_db_path(), json).ok();
+    }
+}
+
 impl DownloadManager {
     pub fn new() -> Self {
-        Self { items: Arc::new(Mutex::new(Vec::new())), cancel_tx: Arc::new(Mutex::new(HashMap::new())) }
+        let items = load_downloads();
+        Self { items: Arc::new(Mutex::new(items)), cancel_tx: Arc::new(Mutex::new(HashMap::new())) }
     }
 }
 
@@ -58,6 +81,7 @@ pub async fn start_download(anime_id: String, anime_name: String, episode: Strin
         id: id.clone(), anime_id: anime_id.clone(), anime_name: anime_name.clone(),
         episode: episode.clone(), mode: mode.clone(),
         status: DownloadStatus::Queued, progress: 0.0, file_path: String::new(), error: None,
+        downloaded_bytes: 0, total_bytes: 0,
     };
 
     { let mut items = dm.items.lock().unwrap(); items.retain(|i| i.id != id); items.push(item); }
@@ -97,7 +121,10 @@ async fn do_download(id: String, anime_id: String, anime_name: String, episode: 
 
     // Download the file
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build().unwrap();
-    let resp = match client.get(&url).send().await {
+    let resp = match client.get(&url)
+        .header("Referer", "https://allmanga.to")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0")
+        .send().await {
         Ok(r) => r,
         Err(e) => { update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some(e.to_string()); }); return; }
     };
@@ -128,7 +155,7 @@ async fn do_download(id: String, anime_id: String, anime_name: String, episode: 
                 }
                 downloaded += bytes.len() as u64;
                 let pct = if total > 0 { 15.0 + (downloaded as f64 / total as f64) * 85.0 } else { 50.0 };
-                update_item(&items, &id, |i| i.progress = pct);
+                update_item(&items, &id, |i| { i.progress = pct; i.downloaded_bytes = downloaded; i.total_bytes = total; });
             }
             Err(e) => { update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some(e.to_string()); }); return; }
         }
@@ -140,6 +167,7 @@ async fn do_download(id: String, anime_id: String, anime_name: String, episode: 
 fn update_item(items: &Arc<Mutex<Vec<DownloadItem>>>, id: &str, f: impl FnOnce(&mut DownloadItem)) {
     if let Ok(mut list) = items.lock() {
         if let Some(item) = list.iter_mut().find(|i| i.id == id) { f(item); }
+        persist_downloads(&list);
     }
 }
 
@@ -226,7 +254,12 @@ pub async fn cancel_download(id: String, dm: State<'_, DownloadManager>) -> Resu
 
 #[tauri::command]
 pub async fn remove_download(id: String, dm: State<'_, DownloadManager>) -> Result<(), String> {
-    dm.items.lock().unwrap().retain(|i| i.id != id);
+    let mut items = dm.items.lock().unwrap();
+    if let Some(item) = items.iter().find(|i| i.id == id) {
+        if !item.file_path.is_empty() { fs::remove_file(&item.file_path).ok(); }
+    }
+    items.retain(|i| i.id != id);
+    persist_downloads(&items);
     Ok(())
 }
 
@@ -234,4 +267,9 @@ pub async fn remove_download(id: String, dm: State<'_, DownloadManager>) -> Resu
 pub async fn open_download_folder() -> Result<(), String> {
     let dir = download_dir();
     open::that(dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn open_file(path: String) -> Result<(), String> {
+    open::that(&path).map_err(|e| e.to_string())
 }

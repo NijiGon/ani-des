@@ -4,14 +4,14 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>AniDes</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Righteous&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#080b12;--s1:#0f1420;--s2:#161d2e;--border:#1e2a3a;--accent:#00d4aa;--accent2:#ff7b54;--text:#e4e8f0;--text2:#6b7a8d;--r:10px;--shadow:0 4px 20px rgba(0,0,0,.5)}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:13px}
 .app{margin:0;padding:20px 32px}
 .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border)}
-.logo{font-size:1.2em;font-weight:800;background:linear-gradient(135deg,var(--accent2),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;cursor:pointer}
+.logo{font-family:'Righteous',cursive;font-size:1.4em;font-weight:400;background:linear-gradient(135deg,var(--accent2),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;cursor:pointer;letter-spacing:.5px}
 .hactions{display:flex;gap:6px;align-items:center}
 .badge{font-size:10px;color:var(--text2);background:var(--s1);padding:3px 8px;border-radius:12px;border:1px solid var(--border)}
 .btn{padding:7px 14px;border:none;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .12s;display:inline-flex;align-items:center;gap:4px}
@@ -62,7 +62,8 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-h
 .detail-meta{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px}
 .tag{font-size:9px;padding:2px 7px;border-radius:8px;background:var(--s2);border:1px solid var(--border);color:var(--text2)}
 .tag.st{color:var(--accent);border-color:var(--accent)}
-.detail-desc{font-size:11px;color:var(--text2);line-height:1.5;max-height:80px;overflow-y:auto}
+.detail-desc{font-size:11px;color:var(--text2);line-height:1.6;max-height:100px;overflow-y:auto;padding-right:8px;white-space:pre-wrap}
+.detail-desc::-webkit-scrollbar{width:4px}.detail-desc::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
 /* Episodes */
 .epgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:4px;margin-top:8px}
 .epgrid .btn{justify-content:center;padding:6px 3px;font-size:11px;background:var(--s1)}
@@ -77,9 +78,10 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-h
 .player-wrap:fullscreen .ctrls{border-radius:0}
 video{width:100%;display:block;aspect-ratio:16/9;cursor:pointer;max-height:70vh}
 .ep-now{font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px}
-.pbar{display:flex;align-items:center;justify-content:space-between;padding:6px 0;gap:6px}
-.pbar .left,.pbar .right{display:flex;align-items:center;gap:5px}
-.qrow{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
+.pbar{display:flex;align-items:center;justify-content:space-between;padding:10px 0;gap:6px;border-bottom:1px solid var(--border);margin-bottom:8px}
+.pbar .left,.pbar .right{display:flex;align-items:center;gap:6px}
+.qrow{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;align-items:center}
+.qrow::before{content:'Quality';font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-right:4px}
 .toggle{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);cursor:pointer}
 .toggle input{accent-color:var(--accent)}
 /* Custom controls */
@@ -130,7 +132,7 @@ video{width:100%;display:block;aspect-ratio:16/9;cursor:pointer;max-height:70vh}
 
 <script>
 const{invoke}=window.__TAURI__.core;
-let S={view:'home',mode:'sub',country:'ALL',sort:'default',query:'',results:[],episodes:[],anime:null,details:null,links:[],history:[],bookmarks:[],autoNext:true,currentEp:''};
+let S={view:'home',mode:'sub',country:'ALL',sort:'default',query:'',genre:'',genres:[],results:[],episodes:[],anime:null,details:null,links:[],history:[],bookmarks:[],autoNext:true,currentEp:'',page:1,hasMore:true,loading:false};
 let saveInt=null,progAnim=null,acTimer=null;
 
 async function uc(){try{const s=await invoke('get_cache_stats');document.getElementById('cbadge').textContent=`${s.search_entries+s.episode_entries+s.link_entries} cached`;}catch(e){}}
@@ -149,11 +151,7 @@ function render(){
       <div class="filters">
         <span class="flabel">Mode</span><div class="fgroup"><button class="btn bg ${S.mode==='sub'?'active':''}" onclick="S.mode='sub'">Sub</button><button class="btn bg ${S.mode==='dub'?'active':''}" onclick="S.mode='dub'">Dub</button></div>
         <span class="flabel" style="margin-left:8px">Origin</span><div class="fgroup">${['ALL','JP','CN','KR'].map(c=>`<button class="btn bg ${S.country===c?'active':''}" onclick="S.country='${c}'">${c}</button>`).join('')}</div>
-        <span class="flabel" style="margin-left:8px">Sort</span><div class="fgroup">
-          <button class="btn bg ${S.sort==='default'?'active':''}" onclick="S.sort='default'">Default</button>
-          <button class="btn bg ${S.sort==='name'?'active':''}" onclick="S.sort='name'">A-Z</button>
-          <button class="btn bg ${S.sort==='episodes'?'active':''}" onclick="S.sort='episodes'">Eps</button>
-          <button class="btn bg ${S.sort==='rating'?'active':''}" onclick="S.sort='rating'">★</button></div>
+        <span class="flabel" style="margin-left:8px">Genre</span><select class="sinput" style="width:auto;padding:4px 8px;font-size:10px" onchange="S.genre=this.value"><option value="">Any</option>${S.genres.map(g=>`<option value="${g}" ${S.genre===g?'selected':''}>${g}</option>`).join('')}</select>
       </div>
       <div id="hist"></div>
       <div id="recent">${skelCards(6)}</div>
@@ -170,11 +168,8 @@ function render(){
       <div class="filters">
         <span class="flabel">Mode</span><div class="fgroup"><button class="btn bg ${S.mode==='sub'?'active':''}" onclick="S.mode='sub';doSearch()">Sub</button><button class="btn bg ${S.mode==='dub'?'active':''}" onclick="S.mode='dub';doSearch()">Dub</button></div>
         <span class="flabel" style="margin-left:8px">Origin</span><div class="fgroup">${['ALL','JP','CN','KR'].map(c=>`<button class="btn bg ${S.country===c?'active':''}" onclick="S.country='${c}';doSearch()">${c}</button>`).join('')}</div>
-        <span class="flabel" style="margin-left:8px">Sort</span><div class="fgroup">
-          <button class="btn bg ${S.sort==='default'?'active':''}" onclick="S.sort='default';sortR()">Default</button>
-          <button class="btn bg ${S.sort==='name'?'active':''}" onclick="S.sort='name';sortR()">A-Z</button>
-          <button class="btn bg ${S.sort==='episodes'?'active':''}" onclick="S.sort='episodes';sortR()">Eps</button>
-          <button class="btn bg ${S.sort==='rating'?'active':''}" onclick="S.sort='rating';sortR()">★</button></div>
+        <span class="flabel" style="margin-left:8px">Genre</span><select class="sinput" style="width:auto;padding:4px 8px;font-size:10px" onchange="S.genre=this.value;doSearch()"><option value="">Any</option>${S.genres.map(g=>`<option value="${g}" ${S.genre===g?'selected':''}>${g}</option>`).join('')}</select>
+      </div>
       </div>
       <div id="status" class="status-msg"></div>
       <div class="cards" id="results">${S.results.length?'':skelCards(8)}</div>`;
@@ -188,20 +183,20 @@ function render(){
         <div class="detail-thumb">${d.thumbnail?`<img src="${d.thumbnail}"/>`:'<div style="height:180px" class="skel"></div>'}</div>
         <div class="detail-info">
           <div class="detail-title">${d.name}</div>
+          ${d.title_romaji&&d.title_romaji!==d.name?`<div style="font-size:10px;color:var(--text2);margin-bottom:5px">${d.title_romaji}</div>`:''}
           <div class="detail-meta">
             ${d.status?`<span class="tag st">${d.status}</span>`:''}
             <span class="tag">${d.episode_count||S.episodes.length} ep</span>
             ${d.rating?`<span class="tag" style="color:#ffd700;border-color:#ffd700">★ ${d.rating.toFixed(1)}</span>`:''}
             ${(d.genres||[]).map(g=>`<span class="tag">${g}</span>`).join('')}
           </div>
-          <div class="detail-desc">${d.description||'No description.'}</div>
+          <div class="detail-desc">${cleanDesc(d.description)}</div>
           <div style="margin-top:8px;display:flex;gap:6px"><button class="btn bp" onclick="if(S.episodes.length)getLinks(S.episodes[0])">▶ Watch</button><select class="sinput" style="width:auto;padding:5px 8px;font-size:10px" onchange="addToLibrary(this.value)"><option value="">+ Library</option><option value="watching">Watching</option><option value="plan_to_watch">Plan to Watch</option><option value="finished">Finished</option><option value="dropped">Dropped</option></select></div>
         </div>
       </div>
       <div class="slabel" style="display:flex;justify-content:space-between;align-items:center"><span>Episodes</span><div style="display:flex;gap:4px"><button class="btn bg" onclick="toggleBulk()" id="bulkbtn">Select</button><button class="btn bp" id="dlselbtn" style="display:none" onclick="downloadSelected()">↓ DL</button></div></div>
       <div class="epgrid" id="epgrid">${S.episodes.length?S.episodes.map(ep=>`<button class="btn bg ep-btn" data-ep="${ep}" onclick="epClick('${ep}',event)">${ep}</button>`).join(''):'<div class="status-msg" id="ep-loading">Loading episodes...</div>'}</div>
       <div id="status" class="status-msg"></div>`;
-    if(!S.episodes.length)loadEpisodesInline();
 
   }else if(S.view==='loading'){
     app.innerHTML=bc([['Home','goHome()'],['Search','goSearch()'],[S.anime.name,'goDetail()'],['Ep '+S.currentEp]])+`<div class="ep-now">${S.anime.name} — Ep ${S.currentEp}</div><div class="loader"><div class="lbar"><div class="lfill" id="pbar"></div></div><div class="ltxt" id="ptxt">Fetching sources...</div></div>`;
@@ -246,7 +241,7 @@ function render(){
   }else if(S.view==='library'){
     const labels={watching:'Watching',plan_to_watch:'Plan to Watch','break':'On Break',finished:'Finished',dropped:'Dropped'};
     app.innerHTML=bc([['Home','goHome()'],['Library']])+`
-      <div class="filters" style="margin-bottom:12px">${Object.entries(labels).map(([t,l])=>`<button class="btn bg ${S.libTag===t?'active':''}" onclick="S.libTag='${t}';loadLibrary()">${l}</button>`).join('')}<button class="btn bg ${!S.libTag?'active':''}" onclick="S.libTag='';loadLibrary()">All</button></div>
+      <div class="filters" style="margin-bottom:12px" id="lib-filters">${Object.entries(labels).map(([t,l])=>`<button class="btn bg ${S.libTag===t?'active':''}" onclick="S.libTag='${t}';updateLibFilters();loadLibrary()">${l}</button>`).join('')}<button class="btn bg ${!S.libTag?'active':''}" onclick="S.libTag='';updateLibFilters();loadLibrary()">All</button></div>
       <div id="lib-content"></div>`;
     loadLibrary();
 
@@ -263,6 +258,7 @@ function render(){
 
 <script>
 // Autocomplete
+function cleanDesc(s){if(!s)return'No description.';return s.replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/\n{3,}/g,'\n\n').trim();}
 function onSearchInput(e){
   clearTimeout(acTimer);
   const q=e.target.value.trim();if(q.length<3){document.getElementById('aclist')?.classList.remove('show');return;}
@@ -276,24 +272,25 @@ function onSearchInput(e){
 }
 
 function renderCards(){
-  document.getElementById('results').innerHTML=S.results.map((r,i)=>`<div class="card" onclick="openDetail(${i})">${r.thumbnail?`<img class="card-img" src="${r.thumbnail}" onerror="this.style.display='none'"/>`:`<div style="width:100%;aspect-ratio:3/4;background:var(--s2)"></div>`}<div class="card-body"><div class="card-title">${r.name}</div><div class="card-meta">${r.episodes} ep${r.rating?` · ★${r.rating.toFixed(1)}`:''}</div></div></div>`).join('');
+  document.getElementById('results').innerHTML=S.results.map((r,i)=>`<div class="card" onclick="openDetail(${i})" title="${(r.name||'').replace(/"/g,'&quot;')}">${r.thumbnail?`<img class="card-img" src="${r.thumbnail}" onerror="this.parentElement.querySelector('.card-ph')?.remove();this.outerHTML=cardPh()"/>`:`${cardPh()}`}<div class="card-body"><div class="card-title">${r.name}</div><div class="card-meta">${r.episodes} ep${r.rating?` · ★${r.rating.toFixed(1)}`:''}</div></div></div>`).join('');
 }
-function sortR(){if(S.sort==='name')S.results.sort((a,b)=>a.name.localeCompare(b.name));else if(S.sort==='episodes')S.results.sort((a,b)=>b.episodes-a.episodes);else if(S.sort==='rating')S.results.sort((a,b)=>(b.rating||0)-(a.rating||0));render();}
+function cardPh(){return `<div class="card-ph" style="width:100%;aspect-ratio:3/4;background:var(--s2);display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="2"/><path d="M21 15l-5-5L5 21"/></svg></div>`;}
+function sortR(){if(S.sort==='name')S.results.sort((a,b)=>a.name.localeCompare(b.name));else if(S.sort==='episodes')S.results.sort((a,b)=>b.episodes-a.episodes);else if(S.sort==='rating')S.results.sort((a,b)=>(b.rating||0)-(a.rating||0));if(S.results.length)renderCards();document.querySelectorAll('.sort-btn').forEach(b=>b.classList.toggle('active',b.dataset.sort===S.sort));}
 
 // Home
 async function loadHome(){
-  function sec(el,label,items){if(!el||!items.length)return;el.innerHTML=`<div class="slabel">${label}</div><div class="cards">${items.map(r=>{const d=JSON.stringify({id:r.id?.toString()||'',name:r.title||r.name||'',thumbnail:r.cover||r.thumbnail||'',episodes:r.episodes||0,rating:r.score||r.rating||0}).replace(/"/g,'&quot;');const img=r.cover||r.thumbnail;return`<div class="card" onclick="openFromHome(${d})">${img?`<img class="card-img" src="${img}" onerror="this.style.display='none'"/>`:`<div style="width:100%;aspect-ratio:3/4;background:var(--s2)"></div>`}<div class="card-body"><div class="card-title">${r.title||r.name||''}</div><div class="card-meta">${r.episodes||0} ep${(r.score||r.rating)?` · ★${(r.score||r.rating).toFixed(1)}`:''}</div></div></div>`;}).join('')}</div>`;}
+  function sec(el,label,items){if(!el||!items.length)return;el.innerHTML=`<div class="slabel">${label}</div><div class="cards">${items.map(r=>{const d=JSON.stringify({id:r.id?.toString()||'',name:r.title||r.name||'',title_romaji:r.title_romaji||'',thumbnail:r.cover||r.thumbnail||'',episodes:r.episodes||0,rating:r.score||r.rating||0}).replace(/"/g,'&quot;');const img=r.cover||r.thumbnail;const name=r.title||r.name||'';return`<div class="card" onclick="openFromHome(${d})" title="${name}">${img?`<img class="card-img" src="${img}" onerror="this.outerHTML=cardPh()"/>`:`${cardPh()}`}<div class="card-body"><div class="card-title">${name}</div><div class="card-meta">${r.episodes||0} ep${(r.score||r.rating)?` · ★${(r.score||r.rating).toFixed(1)}`:''}</div></div></div>`;}).join('')}</div>`;}
   invoke('anilist_trending').then(i=>sec(document.getElementById('recent'),'<i data-lucide="trending-up" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Trending',i)).catch(()=>invoke('get_recently_updated',{mode:S.mode}).then(i=>sec(document.getElementById('recent'),'<i data-lucide="clock" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Recent',i)).catch(()=>{}));
   invoke('anilist_popular').then(i=>sec(document.getElementById('popular'),'<i data-lucide="flame" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Popular',i)).catch(()=>invoke('get_popular',{mode:S.mode}).then(i=>sec(document.getElementById('popular'),'<i data-lucide="flame" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Popular',i)).catch(()=>{}));
 }
 
 function openFromHome(r){
-  S.anime=r;S.results=[r];S.view='detail';S.episodes=[];
-  S.details={id:r.id,name:r.name,thumbnail:r.thumbnail||'',description:'',genres:[],status:'',episode_count:r.episodes||0,rating:r.rating||0};
-  render();
+  S.anime=r;S.results=[r];
+  openDetail(0);
 }
 async function loadHistory(){try{S.history=await invoke('get_history');const el=document.getElementById('hist');if(!S.history.length){el.innerHTML='';return;}el.innerHTML=`<div class="slabel">Continue Watching</div><ul class="list">${S.history.map((h,i)=>`<li class="li" onclick="resumeH(${i})"><div><span class="t">${h.name}</span><span class="m" style="margin-left:6px">Ep ${h.episode} · ${fmt(h.progress)}</span></div><span class="del" onclick="event.stopPropagation();delH(${i})">✕</span></li>`).join('')}</ul>`;}catch(e){}}
 function fmt(s){const m=Math.floor(s/60),sec=Math.floor(s%60);return m+':'+(sec<10?'0':'')+sec;}
+function fmtBytes(b){if(!b)return'0 B';const u=['B','KB','MB','GB'];let i=0;let v=b;while(v>=1024&&i<3){v/=1024;i++;}return v.toFixed(i?1:0)+' '+u[i];}
 async function resumeH(i){const h=S.history[i];S.anime={id:h.id,name:h.name};S.mode=h.mode;S.resumeProgress=h.progress;const[d,eps]=await Promise.all([invoke('get_anime_details',{showId:h.id}).catch(()=>null),invoke('get_episodes',{showId:h.id,mode:h.mode})]);if(d)S.details=d;S.episodes=eps;S.view='detail';render();getLinks(h.episode);}
 async function delH(i){const h=S.history[i];await invoke('delete_history',{id:h.id,mode:h.mode});loadHistory();}
 
@@ -316,9 +313,16 @@ async function loadEpisodesInline(){
 }
 async function openDetail(i){
   S.anime=S.results[i];S.view='detail';S.episodes=[];
-  S.details={id:S.anime.id,name:S.anime.name,thumbnail:S.anime.thumbnail||'',description:'',genres:[],status:'',episode_count:S.anime.episodes,rating:S.anime.rating||0};
+  S.details={id:S.anime.id,name:S.anime.name,title_romaji:S.anime.title_romaji||'',thumbnail:S.anime.thumbnail||'',description:'',genres:[],status:'',episode_count:S.anime.episodes,rating:S.anime.rating||0};
   render();
-  try{const eps=await invoke('get_episodes',{showId:S.anime.id,mode:S.mode});S.episodes=eps;render();const d=await invoke('get_anime_details',{showId:S.anime.id});S.details={...S.details,...d};render();}catch(e){}
+  // Load episodes (resolve AllAnime ID if needed)
+  let showId=S.anime.id;
+  if(!isNaN(showId)){
+    try{const res=await invoke('search_anime',{query:S.anime.name,mode:S.mode,country:'ALL'});if(res.length){showId=res[0].id;S.anime.id=showId;}}catch(e){}
+  }
+  try{const eps=await invoke('get_episodes',{showId,mode:S.mode});S.episodes=eps;const g=document.getElementById('epgrid');if(g&&S.view==='detail')g.innerHTML=eps.map(ep=>`<button class="btn bg ep-btn" data-ep="${ep}" onclick="epClick('${ep}',event)">${ep}</button>`).join('')||'<div class="status-msg">No episodes</div>';}catch(e){}
+  // Load full details in background (don't re-render, just update info)
+  try{const d=await invoke('get_anime_details',{showId});if(S.view==='detail'){S.details={...S.details,...d};const desc=document.querySelector('.detail-desc');if(desc&&d.description)desc.textContent=cleanDesc(d.description);}}catch(e){}
 }
 
 // Player
@@ -331,7 +335,7 @@ async function playSrc(i){
   document.querySelectorAll('.qbtn').forEach((b,idx)=>{b.classList.toggle('bp',idx===i);b.classList.toggle('bg',idx!==i);});
   if(window._hls){window._hls.destroy();window._hls=null;}
   let url=S.links[i].url;
-  if(!url.includes('.m3u8')){try{url=await invoke('set_proxy_url',{url,referrer:'https://allmanga.to'});}catch(e){}}
+  if(!url.includes('.m3u8')&&!url.startsWith('http://127.0.0.1')){try{url=await invoke('set_proxy_url',{url,referrer:'https://allmanga.to'});}catch(e){}}
   if(url.includes('.m3u8')){
     if(Hls.isSupported()){const hls=new Hls();hls.loadSource(url);hls.attachMedia(v);hls.on(Hls.Events.MANIFEST_PARSED,()=>{seekR(v);v.play();});hls.on(Hls.Events.ERROR,(_,d)=>{if(d.fatal)document.getElementById('status').textContent='Playback error';});window._hls=hls;}
     else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=url;v.onloadedmetadata=()=>seekR(v);}
@@ -409,7 +413,33 @@ function transitionTo(newView,cb){
 // Navigation
 function goHome(){transitionTo('home',()=>{S.view='home';S.results=[];S.query='';render();});}
 function goSearch(){S.view='search';render();}
-function goDetail(){S.view='detail';render();}async function doSearch(){S.query=document.getElementById('q')?.value?.trim()||S.query;if(!S.query)return;document.getElementById('aclist')?.classList.remove('show');transitionTo('search',async()=>{S.view='search';render();document.getElementById('status').textContent='Searching...';try{S.results=await invoke('search_anime',{query:S.query,mode:S.mode,country:S.country});if(S.sort!=='default')sortR();else{renderCards();document.getElementById('status').textContent=S.results.length?'':'No results.';animate();}}catch(e){document.getElementById('status').textContent='Error: '+e;}});}
+function goDetail(){S.view='detail';render();}async function doSearch(){S.query=document.getElementById('q')?.value?.trim()||S.query;if(!S.query&&!S.genre)return;document.getElementById('aclist')?.classList.remove('show');S.page=1;S.hasMore=true;S.results=[];S.view='search';render();await fetchResults();}
+
+async function fetchResults(){
+  const st=document.getElementById('status');if(st)st.textContent=S.page>1?'':'Searching...';S.loading=true;
+  if(S.page>1){const el=document.getElementById('results');if(el)el.insertAdjacentHTML('afterend','<div id="load-more" class="status-msg" style="padding:16px"><div class="lbar" style="width:120px;margin:0 auto"><div class="lfill" style="width:60%;animation:shimmer 1s infinite"></div></div></div>');}
+  try{
+    let newItems=[];
+    if(S.genre){
+      const items=await invoke('anilist_search',{queryStr:S.query||'',genre:S.genre,year:null,season:null,sort:null,format:null,page:S.page});
+      newItems=items.map(r=>({id:r.id.toString(),name:r.title||r.title_romaji,thumbnail:r.cover,episodes:r.episodes||0,rating:r.score||0}));
+      S.hasMore=newItems.length>=50;
+    }else{
+      newItems=await invoke('search_anime',{query:S.query,mode:S.mode,country:S.country});
+      S.hasMore=false;
+    }
+    S.results=S.results.concat(newItems);
+    renderCards();
+    if(st)st.textContent=S.results.length?'':'No results.';
+  }catch(e){if(st)st.textContent='Error: '+e;}
+  S.loading=false;document.getElementById('load-more')?.remove();
+}
+
+// Infinite scroll
+window.addEventListener('scroll',()=>{
+  if(S.view!=='search'||!S.hasMore||S.loading)return;
+  if(window.innerHeight+window.scrollY>=document.body.offsetHeight-300){S.page++;fetchResults();}
+});
 async function getLinks(ep){S.currentEp=ep;S.links=[];transitionTo('loading',async()=>{S.view='loading';render();try{S.links=await invoke('get_episode_url',{showId:S.anime.id,episode:ep,mode:S.mode,quality:'best',title:S.anime.name||''});clearInterval(progAnim);S.view='player';render();}catch(e){clearInterval(progAnim);const t=document.getElementById('ptxt');if(t)t.textContent='Error: '+e;}});}
 
 // Library
@@ -439,6 +469,7 @@ async function loadLibrary(){
   if(window.lucide)try{lucide.createIcons();}catch(e){}
 }
 async function setTag(id,mode,tag){await invoke('set_history_tag',{id,mode,tag});loadLibrary();}
+function updateLibFilters(){const btns=document.querySelectorAll('#lib-filters .btn');const labels=['watching','plan_to_watch','break','finished','dropped',''];btns.forEach((b,i)=>b.classList.toggle('active',labels[i]===S.libTag));}
 async function delH2(id,mode){await invoke('delete_history',{id,mode});loadLibrary();}
 async function resumeH2(id,mode){const items=await invoke('get_history');const h=items.find(e=>e.id===id&&e.mode===mode);if(!h)return;S.anime={id:h.id,name:h.name};S.mode=h.mode;S.resumeProgress=h.progress;const eps=await invoke('get_episodes',{showId:h.id,mode:h.mode});S.episodes=eps;S.view='detail';S.details={id:h.id,name:h.name,thumbnail:h.thumbnail||'',description:'',genres:[],status:'',episode_count:eps.length,rating:0};render();getLinks(h.episode);}
 
@@ -458,10 +489,42 @@ function toggleBulk(){bulkMode=!bulkMode;selectedEps.clear();const b=document.ge
 function epClick(ep,e){if(!bulkMode){getLinks(ep);return;}if(selectedEps.has(ep)){selectedEps.delete(ep);e.target.classList.remove('active');}else{selectedEps.add(ep);e.target.classList.add('active');}const d=document.getElementById('dlselbtn');if(d)d.textContent=`↓ DL (${selectedEps.size})`;}
 async function downloadSelected(){if(!selectedEps.size)return;await invoke('start_bulk_download',{animeId:S.anime.id,animeName:S.anime.name||S.details?.name||'',episodes:[...selectedEps],mode:S.mode});toggleBulk();showDownloads();}
 async function showDownloads(){transitionTo('downloads',()=>{S.view='downloads';render();});}
+async function playOffline(path){
+  if(!path){alert('No file path');return;}
+  try{
+    const url=await invoke('set_proxy_url',{url:'localfile:'+path,referrer:null});
+    S.anime=S.anime||{id:'offline',name:'Downloaded'};
+    S.view='player';S.links=[{quality:'offline',url}];S.currentEp='offline';S.episodes=[];render();
+  }catch(e){alert('Error: '+e);}
+}
 let dlRef=null;
-async function refreshDownloads(){const items=await invoke('get_downloads');const el=document.getElementById('dl-list');if(!el)return;if(!items.length){el.innerHTML='<div class="status-msg">No downloads</div>';return;}el.innerHTML=items.map(d=>`<li class="li" style="flex-direction:column;align-items:stretch;gap:4px"><div style="display:flex;justify-content:space-between;align-items:center"><span class="t">${d.anime_name} Ep ${d.episode}</span><div style="display:flex;gap:4px;align-items:center">${d.status==='Downloading'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('cancel_download',{id:'${d.id}'})">Cancel</button>`:''}${d.status==='Done'||d.status==='Failed'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('remove_download',{id:'${d.id}'}).then(refreshDownloads)">Remove</button>`:''}<span class="m">${d.status}</span></div></div>${d.status==='Downloading'||d.status==='Queued'?`<div style="width:100%;height:2px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${d.progress}%;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .3s"></div></div>`:''}</li>`).join('');if(items.some(d=>d.status==='Downloading'||d.status==='Queued')){clearTimeout(dlRef);dlRef=setTimeout(refreshDownloads,1500);}}
+async function refreshDownloads(){const items=await invoke('get_downloads');const el=document.getElementById('dl-list');if(!el)return;if(!items.length){el.innerHTML='<div class="status-msg">No downloads</div>';return;}
+  window._dlItems=items;
+  const groups={};items.forEach((d,idx)=>{d._idx=idx;if(!groups[d.anime_name])groups[d.anime_name]=[];groups[d.anime_name].push(d);});
+  el.innerHTML=Object.entries(groups).map(([name,eps])=>`
+    <div style="margin-bottom:12px">
+      <div class="slabel">${name}</div>
+      <ul class="list">${eps.map(d=>`<li class="li" style="padding:8px 12px;flex-direction:column;align-items:stretch;gap:4px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span class="t">Ep ${d.episode}</span>
+          <div style="display:flex;gap:4px;align-items:center">
+            ${d.status==='Done'?`<button class="btn bp" style="padding:2px 8px;font-size:9px" onclick="playOffline(window._dlItems[${d._idx}].file_path)">▶</button>`:''}
+            ${d.status==='Downloading'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('cancel_download',{id:'${d.id}'})">Cancel</button>`:''}
+            ${d.status==='Done'||d.status==='Failed'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('remove_download',{id:'${d.id}'}).then(refreshDownloads)">✕</button>`:''}
+            <span class="m">${d.status}</span>
+          </div>
+        </div>
+        ${d.status==='Downloading'||d.status==='Queued'?`
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="flex:1;height:3px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:${d.progress}%;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .3s"></div></div>
+            <span style="font-size:9px;color:var(--text2);white-space:nowrap">${Math.round(d.progress)}% · ${fmtBytes(d.downloaded_bytes)}/${fmtBytes(d.total_bytes)}</span>
+          </div>`:''}
+        ${d.error?`<span style="font-size:9px;color:var(--accent2)">${d.error}</span>`:''}
+      </li>`).join('')}</ul>
+    </div>`).join('');
+  if(items.some(d=>d.status==='Downloading'||d.status==='Queued')){clearTimeout(dlRef);dlRef=setTimeout(refreshDownloads,1500);}}
 
-render();
+invoke('anilist_genres').then(g=>{S.genres=g;}).catch(()=>{}).finally(()=>render());
 </script>
 </body>
 </html>

@@ -17,8 +17,7 @@ impl ProxyState {
     }
 }
 
-pub fn start_proxy(state: Arc<ProxyState>) {
-    tokio::spawn(async move {
+pub async fn start_proxy(state: Arc<ProxyState>) {
         use tokio::net::TcpListener;
         use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
@@ -45,6 +44,38 @@ pub fn start_proxy(state: Arc<ProxyState>) {
                         .and_then(|l| l.split("bytes=").nth(1))
                         .and_then(|r| r.split('-').next())
                         .and_then(|s| s.trim().parse::<u64>().ok());
+
+                    // Handle local files
+                    if url.starts_with("localfile:") || url.starts_with("file:///") {
+                        let file_path = if url.starts_with("localfile:") {
+                            url.strip_prefix("localfile:").unwrap_or("").to_string()
+                        } else {
+                            let p = url.strip_prefix("file:///").unwrap_or("");
+                            percent_encoding::percent_decode_str(p).decode_utf8_lossy().to_string()
+                        };
+                        match tokio::fs::File::open(&file_path).await {
+                            Ok(mut file) => {
+                                use tokio::io::AsyncReadExt;
+                                let total = tokio::fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0);
+                                let (start, status) = if let Some(s) = range_start { (s, "206 Partial Content") } else { (0, "200 OK") };
+                                let remaining = total.saturating_sub(start);
+                                let mut header = format!("HTTP/1.1 {}\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n", status, remaining);
+                                if range_start.is_some() { header.push_str(&format!("Content-Range: bytes {}-{}/{}\r\n", start, total-1, total)); }
+                                header.push_str("\r\n");
+                                let _ = stream.write_all(header.as_bytes()).await;
+                                use tokio::io::AsyncSeekExt;
+                                if start > 0 { let _ = file.seek(std::io::SeekFrom::Start(start)).await; }
+                                let mut buf = vec![0u8; 65536];
+                                loop {
+                                    let n = file.read(&mut buf).await.unwrap_or(0);
+                                    if n == 0 { break; }
+                                    if stream.write_all(&buf[..n]).await.is_err() { break; }
+                                }
+                            }
+                            Err(_) => { let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await; }
+                        }
+                        return;
+                    }
 
                     let client = reqwest::Client::builder().build().unwrap();
                     let mut req_builder = client.get(&url)
@@ -87,7 +118,6 @@ pub fn start_proxy(state: Arc<ProxyState>) {
                 });
             }
         }
-    });
 }
 
 #[tauri::command]
