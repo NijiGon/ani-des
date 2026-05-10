@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>AniDes</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#080b12;--s1:#0f1420;--s2:#161d2e;--border:#1e2a3a;--accent:#00d4aa;--accent2:#ff7b54;--text:#e4e8f0;--text2:#6b7a8d;--r:10px;--shadow:0 4px 20px rgba(0,0,0,.5)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:13px}
+.app{margin:0;padding:20px 32px}
+.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.logo{font-size:1.2em;font-weight:800;background:linear-gradient(135deg,var(--accent2),var(--accent));-webkit-background-clip:text;-webkit-text-fill-color:transparent;cursor:pointer}
+.hactions{display:flex;gap:6px;align-items:center}
+.badge{font-size:10px;color:var(--text2);background:var(--s1);padding:3px 8px;border-radius:12px;border:1px solid var(--border)}
+.btn{padding:7px 14px;border:none;border-radius:8px;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;transition:all .12s;display:inline-flex;align-items:center;gap:4px}
+.bp{background:linear-gradient(135deg,var(--accent2),var(--accent));color:#fff}.bp:hover{opacity:.85}
+.bg{background:transparent;color:var(--text2);border:1px solid var(--border)}.bg:hover{border-color:var(--accent);color:var(--text)}
+.bg.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn:disabled{opacity:.3;cursor:default}
+.sinput{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:var(--r);background:var(--s1);color:var(--text);font-size:13px;font-family:inherit;transition:border .2s}
+.sinput:focus{outline:none;border-color:var(--accent)}
+.sinput::placeholder{color:var(--text2)}
+.search-wrap{position:relative;flex:1}
+.ac-list{position:absolute;top:100%;left:0;right:0;background:var(--s1);border:1px solid var(--border);border-radius:0 0 var(--r) var(--r);max-height:200px;overflow-y:auto;z-index:50;display:none}
+.ac-list.show{display:block}
+.ac-item{padding:8px 14px;cursor:pointer;font-size:12px;border-bottom:1px solid var(--border)}.ac-item:hover{background:var(--s2)}
+.filters{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+.flabel{font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-right:2px}
+.fgroup{display:flex;gap:3px}
+.list{list-style:none}.li{padding:10px 14px;margin-bottom:5px;background:var(--s1);border:1px solid var(--border);border-radius:var(--r);cursor:pointer;transition:all .12s;display:flex;justify-content:space-between;align-items:center}
+.li:hover{border-color:var(--accent);background:var(--s2)}
+.li .t{font-weight:500;font-size:12px}.li .m{font-size:10px;color:var(--accent);background:rgba(196,77,255,.08);padding:2px 7px;border-radius:10px}
+.del{color:var(--text2);cursor:pointer;font-size:12px;padding:2px 5px;border-radius:4px}.del:hover{color:var(--accent2);background:rgba(255,107,157,.1)}
+.slabel{font-size:9px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:1px;margin:16px 0 8px}
+.breadcrumbs{display:flex;align-items:center;gap:4px;margin-bottom:12px;font-size:11px}
+.breadcrumbs span{color:var(--text2);cursor:pointer;transition:color .15s}.breadcrumbs span:hover{color:var(--accent)}
+.breadcrumbs .sep{color:var(--border);cursor:default;font-size:9px}
+.breadcrumbs .current{color:var(--text);cursor:default;font-weight:600}
+.ptitle{font-size:1em;font-weight:700;margin-bottom:10px}
+.status-msg{text-align:center;color:var(--text2);padding:10px;font-size:12px}
+/* Skeleton */
+.skel{background:linear-gradient(90deg,var(--s1) 25%,var(--s2) 50%,var(--s1) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:var(--r)}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.skel-card{aspect-ratio:3/4;border-radius:var(--r)}
+.skel-text{height:12px;border-radius:4px;margin-bottom:6px}
+/* Cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-top:10px}
+.card{background:var(--s1);border:1px solid var(--border);border-radius:var(--r);overflow:hidden;cursor:pointer;transition:all .12s}
+.card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.card-img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:var(--s2)}
+.card-body{padding:7px 9px}
+.card-title{font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-meta{font-size:9px;color:var(--text2);margin-top:2px}
+/* Detail */
+.detail{display:flex;gap:16px;margin-bottom:16px}
+.detail-thumb{width:140px;min-width:140px;border-radius:var(--r);overflow:hidden;background:var(--s2)}
+.detail-thumb img{width:100%;display:block}
+.detail-info{flex:1}
+.detail-title{font-size:1em;font-weight:700;margin-bottom:5px}
+.detail-meta{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px}
+.tag{font-size:9px;padding:2px 7px;border-radius:8px;background:var(--s2);border:1px solid var(--border);color:var(--text2)}
+.tag.st{color:var(--accent);border-color:var(--accent)}
+.detail-desc{font-size:11px;color:var(--text2);line-height:1.5;max-height:80px;overflow-y:auto}
+/* Episodes */
+.epgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:4px;margin-top:8px}
+.epgrid .btn{justify-content:center;padding:6px 3px;font-size:11px;background:var(--s1)}
+/* Player */
+.player-layout{display:flex;gap:10px}
+.player-main{flex:1;min-width:0}
+.player-sidebar{width:160px;min-width:160px;max-height:460px;overflow-y:auto;background:var(--s1);border:1px solid var(--border);border-radius:var(--r);padding:6px}
+.ep-item{padding:5px 7px;margin-bottom:2px;border-radius:5px;font-size:10px;cursor:pointer;color:var(--text2)}.ep-item:hover{background:var(--s2);color:var(--text)}.ep-item.active{background:var(--accent);color:#fff}
+.player-wrap{background:#000;border-radius:var(--r);overflow:hidden;box-shadow:var(--shadow);position:relative}
+.player-wrap:fullscreen{border-radius:0;display:flex;align-items:center;justify-content:center;width:100vw;height:100vh}
+.player-wrap:fullscreen video{width:100%;height:100%;object-fit:contain}
+.player-wrap:fullscreen .ctrls{border-radius:0}
+video{width:100%;display:block;aspect-ratio:16/9;cursor:pointer;max-height:70vh}
+.ep-now{font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px}
+.pbar{display:flex;align-items:center;justify-content:space-between;padding:6px 0;gap:6px}
+.pbar .left,.pbar .right{display:flex;align-items:center;gap:5px}
+.qrow{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
+.toggle{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2);cursor:pointer}
+.toggle input{accent-color:var(--accent)}
+/* Custom controls */
+.ctrls{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.9));padding:8px 12px 10px;opacity:0;transition:opacity .2s;display:flex;flex-direction:column;gap:5px}
+.player-wrap:hover .ctrls,.player-wrap.paused .ctrls{opacity:1}
+.seekbar{width:100%;height:4px;background:rgba(255,255,255,.15);border-radius:4px;cursor:pointer;position:relative}
+.seekbar:hover{height:5px}
+.seek-buf{position:absolute;top:0;left:0;height:100%;background:rgba(255,255,255,.1);border-radius:4px;pointer-events:none}
+.seek-prog{position:absolute;top:0;left:0;height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:4px;pointer-events:none}
+.seek-prog::after{content:'';position:absolute;right:-4px;top:50%;width:8px;height:8px;background:#fff;border-radius:50%;transform:translateY(-50%);opacity:0;transition:opacity .1s}
+.seekbar:hover .seek-prog::after{opacity:1}
+.crow{display:flex;align-items:center;justify-content:space-between}
+.cleft,.cright{display:flex;align-items:center;gap:8px}
+.cbtn{background:none;border:none;color:#fff;cursor:pointer;padding:2px;opacity:.85;font-size:13px;line-height:1;font-family:inherit;display:flex;align-items:center}.cbtn:hover{opacity:1}
+.cbtn svg{width:16px;height:16px;fill:currentColor}
+.ctime{font-size:10px;color:rgba(255,255,255,.7);font-family:'Inter',sans-serif}
+.vol-wrap{display:flex;align-items:center;gap:3px}
+.vol-s{width:50px;height:3px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.25);border-radius:3px;outline:none;cursor:pointer}
+.vol-s::-webkit-slider-thumb{-webkit-appearance:none;width:8px;height:8px;background:#fff;border-radius:50%;cursor:pointer}
+.spd{font-size:9px;color:rgba(255,255,255,.7);background:rgba(255,255,255,.1);border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-family:inherit}.spd:hover{background:rgba(255,255,255,.2);color:#fff}
+/* Loader */
+.loader{margin:16px 0}.lbar{width:100%;height:3px;background:var(--border);border-radius:3px;overflow:hidden}
+.lfill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:3px;transition:width .3s}
+.ltxt{font-size:11px;color:var(--text2);text-align:center;margin-top:5px}
+/* Modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:var(--s1);border:1px solid var(--border);border-radius:var(--r);padding:18px;width:320px;box-shadow:var(--shadow)}
+.modal h3{margin-bottom:8px;font-size:13px}
+.modal-actions{display:flex;gap:6px;justify-content:flex-end;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="app">
+<div class="header">
+  <span class="logo" onclick="goHome()"><svg style="width:18px;height:18px;vertical-align:middle;margin-right:4px" viewBox="0 0 24 24" fill="url(#lg)"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ff7b54"/><stop offset="100%" stop-color="#00d4aa"/></linearGradient></defs><circle cx="12" cy="12" r="11"/><path d="M9.5 7.5v9l7-4.5z" fill="#080b12"/></svg>AniDes</span>
+  <div class="hactions">
+    <span class="badge" id="cbadge"></span>
+    <button class="btn bg" onclick="showLibrary()"><i data-lucide="library" style="width:14px;height:14px"></i></button>
+    <button class="btn bg" onclick="showDownloads()"><i data-lucide="download" style="width:14px;height:14px"></i></button>
+    <button class="btn bg" onclick="showBookmarks()"><i data-lucide="bookmark" style="width:14px;height:14px"></i></button>
+  </div>
+</div>
+<div id="app"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script src="https://unpkg.com/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+
+<script>
+const{invoke}=window.__TAURI__.core;
+let S={view:'home',mode:'sub',country:'ALL',sort:'default',query:'',results:[],episodes:[],anime:null,details:null,links:[],history:[],bookmarks:[],autoNext:true,currentEp:''};
+let saveInt=null,progAnim=null,acTimer=null;
+
+async function uc(){try{const s=await invoke('get_cache_stats');document.getElementById('cbadge').textContent=`${s.search_entries+s.episode_entries+s.link_entries} cached`;}catch(e){}}
+
+function skelCards(n){return Array(n).fill('<div class="card"><div class="skel skel-card"></div><div class="card-body"><div class="skel skel-text" style="width:80%"></div><div class="skel skel-text" style="width:50%"></div></div></div>').join('');}
+
+function render(){
+  clearInterval(saveInt);uc();const app=document.getElementById('app');
+
+  if(S.view==='home'){
+    app.innerHTML=`
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <div class="search-wrap"><input class="sinput" id="q" value="${S.query}" placeholder="Search anime..." onkeydown="if(event.key==='Enter')doSearch()" oninput="onSearchInput(event)" autofocus/><div class="ac-list" id="aclist"></div></div>
+        <button class="btn bp" onclick="doSearch()">Search</button>
+      </div>
+      <div class="filters">
+        <span class="flabel">Mode</span><div class="fgroup"><button class="btn bg ${S.mode==='sub'?'active':''}" onclick="S.mode='sub'">Sub</button><button class="btn bg ${S.mode==='dub'?'active':''}" onclick="S.mode='dub'">Dub</button></div>
+        <span class="flabel" style="margin-left:8px">Origin</span><div class="fgroup">${['ALL','JP','CN','KR'].map(c=>`<button class="btn bg ${S.country===c?'active':''}" onclick="S.country='${c}'">${c}</button>`).join('')}</div>
+        <span class="flabel" style="margin-left:8px">Sort</span><div class="fgroup">
+          <button class="btn bg ${S.sort==='default'?'active':''}" onclick="S.sort='default'">Default</button>
+          <button class="btn bg ${S.sort==='name'?'active':''}" onclick="S.sort='name'">A-Z</button>
+          <button class="btn bg ${S.sort==='episodes'?'active':''}" onclick="S.sort='episodes'">Eps</button>
+          <button class="btn bg ${S.sort==='rating'?'active':''}" onclick="S.sort='rating'">★</button></div>
+      </div>
+      <div id="hist"></div>
+      <div id="recent">${skelCards(6)}</div>
+      <div id="popular"></div>`;
+    loadHistory();loadHome();
+
+  }else if(S.view==='search'){
+    app.innerHTML=`
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <div class="search-wrap"><input class="sinput" id="q" value="${S.query}" placeholder="Search anime..." onkeydown="if(event.key==='Enter')doSearch()" oninput="onSearchInput(event)"/><div class="ac-list" id="aclist"></div></div>
+        <button class="btn bp" onclick="doSearch()">Search</button>
+        <button class="btn bg" onclick="openSaveBookmark()"><i data-lucide="bookmark-plus" style="width:14px;height:14px"></i></button>
+      </div>
+      <div class="filters">
+        <span class="flabel">Mode</span><div class="fgroup"><button class="btn bg ${S.mode==='sub'?'active':''}" onclick="S.mode='sub';doSearch()">Sub</button><button class="btn bg ${S.mode==='dub'?'active':''}" onclick="S.mode='dub';doSearch()">Dub</button></div>
+        <span class="flabel" style="margin-left:8px">Origin</span><div class="fgroup">${['ALL','JP','CN','KR'].map(c=>`<button class="btn bg ${S.country===c?'active':''}" onclick="S.country='${c}';doSearch()">${c}</button>`).join('')}</div>
+        <span class="flabel" style="margin-left:8px">Sort</span><div class="fgroup">
+          <button class="btn bg ${S.sort==='default'?'active':''}" onclick="S.sort='default';sortR()">Default</button>
+          <button class="btn bg ${S.sort==='name'?'active':''}" onclick="S.sort='name';sortR()">A-Z</button>
+          <button class="btn bg ${S.sort==='episodes'?'active':''}" onclick="S.sort='episodes';sortR()">Eps</button>
+          <button class="btn bg ${S.sort==='rating'?'active':''}" onclick="S.sort='rating';sortR()">★</button></div>
+      </div>
+      <div id="status" class="status-msg"></div>
+      <div class="cards" id="results">${S.results.length?'':skelCards(8)}</div>`;
+    if(S.results.length)renderCards();
+
+  }else if(S.view==='detail'){
+    const d=S.details;
+    if(!d){app.innerHTML=bc([['Home','goHome()'],['Search','goSearch()'],['Loading...']])+`<div style="margin-top:16px">${skelCards(1)}</div>`;return;}
+    app.innerHTML=bc([['Home','goHome()'],['Search','goSearch()'],[d.name]])+`
+      <div class="detail" style="margin-top:10px">
+        <div class="detail-thumb">${d.thumbnail?`<img src="${d.thumbnail}"/>`:'<div style="height:180px" class="skel"></div>'}</div>
+        <div class="detail-info">
+          <div class="detail-title">${d.name}</div>
+          <div class="detail-meta">
+            ${d.status?`<span class="tag st">${d.status}</span>`:''}
+            <span class="tag">${d.episode_count||S.episodes.length} ep</span>
+            ${d.rating?`<span class="tag" style="color:#ffd700;border-color:#ffd700">★ ${d.rating.toFixed(1)}</span>`:''}
+            ${(d.genres||[]).map(g=>`<span class="tag">${g}</span>`).join('')}
+          </div>
+          <div class="detail-desc">${d.description||'No description.'}</div>
+          <div style="margin-top:8px;display:flex;gap:6px"><button class="btn bp" onclick="if(S.episodes.length)getLinks(S.episodes[0])">▶ Watch</button><select class="sinput" style="width:auto;padding:5px 8px;font-size:10px" onchange="addToLibrary(this.value)"><option value="">+ Library</option><option value="watching">Watching</option><option value="plan_to_watch">Plan to Watch</option><option value="finished">Finished</option><option value="dropped">Dropped</option></select></div>
+        </div>
+      </div>
+      <div class="slabel" style="display:flex;justify-content:space-between;align-items:center"><span>Episodes</span><div style="display:flex;gap:4px"><button class="btn bg" onclick="toggleBulk()" id="bulkbtn">Select</button><button class="btn bp" id="dlselbtn" style="display:none" onclick="downloadSelected()">↓ DL</button></div></div>
+      <div class="epgrid" id="epgrid">${S.episodes.length?S.episodes.map(ep=>`<button class="btn bg ep-btn" data-ep="${ep}" onclick="epClick('${ep}',event)">${ep}</button>`).join(''):'<div class="status-msg" id="ep-loading">Loading episodes...</div>'}</div>
+      <div id="status" class="status-msg"></div>`;
+    if(!S.episodes.length)loadEpisodesInline();
+
+  }else if(S.view==='loading'){
+    app.innerHTML=bc([['Home','goHome()'],['Search','goSearch()'],[S.anime.name,'goDetail()'],['Ep '+S.currentEp]])+`<div class="ep-now">${S.anime.name} — Ep ${S.currentEp}</div><div class="loader"><div class="lbar"><div class="lfill" id="pbar"></div></div><div class="ltxt" id="ptxt">Fetching sources...</div></div>`;
+    animProg();
+
+  }else if(S.view==='player'){
+    const idx=S.episodes.indexOf(S.currentEp);
+    app.innerHTML=bc([['Home','goHome()'],['Search','goSearch()'],[S.anime.name,'goDetail()'],['Ep '+S.currentEp]])+`
+      <div class="player-layout" style="margin-top:8px">
+        <div class="player-main">
+          <div class="ep-now">Episode ${S.currentEp}</div>
+          <div class="player-wrap" id="pwrap">
+            <video id="vp" onclick="togglePlay()"></video>
+            <div class="ctrls" onclick="event.stopPropagation()">
+              <div class="seekbar" id="seekbar" onclick="event.stopPropagation();seek(event)"><div class="seek-buf" id="seekbuf"></div><div class="seek-prog" id="seekprog"></div></div>
+              <div class="crow">
+                <div class="cleft">
+                  <button class="cbtn" id="playbtn" onclick="togglePlay()"><svg viewBox="0 0 24 24"><path id="playico" d="M8 5v14l11-7z"/></svg></button>
+                  <button class="cbtn" onclick="skip(-5)" title="Back 5s"><svg viewBox="0 0 24 24"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg></button>
+                  <button class="cbtn" onclick="skip(5)" title="Forward 5s"><svg viewBox="0 0 24 24"><path d="M11.5 8c2.65 0 5.05.99 6.9 2.6L22 7v9h-9l3.62-3.62c-1.39-1.16-3.16-1.88-5.12-1.88-3.54 0-6.55 2.31-7.6 5.5l-2.37-.78C2.92 11.03 6.85 8 11.5 8z"/></svg></button>
+                  <span class="ctime" id="ctime">0:00 / 0:00</span>
+                </div>
+                <div class="cright">
+                  <div class="vol-wrap"><button class="cbtn" id="volbtn" onclick="toggleMute()"><svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg></button><input type="range" class="vol-s" min="0" max="1" step=".05" value="1" oninput="setVol(this.value)"/></div>
+                  <button class="spd" onclick="cycleSpeed()" id="speedbtn">1x</button>
+                  <button class="cbtn" onclick="toggleFS()" title="Fullscreen"><svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="pbar">
+            <div class="left"><button class="btn bg" ${idx>0?'':'disabled'} onclick="prevEp()">◀ Prev</button><button class="btn bp" ${idx<S.episodes.length-1?'':'disabled'} onclick="nextEp()">Next ▶</button></div>
+            <div class="right"><label class="toggle"><input type="checkbox" ${S.autoNext?'checked':''} onchange="S.autoNext=this.checked">Auto-next</label></div>
+          </div>
+          <div class="qrow">${S.links.map((l,i)=>`<button class="btn ${i===0?'bp':'bg'} qbtn" onclick="playSrc(${i})">${l.quality||'default'}</button>`).join('')}</div>
+          <div id="status" class="status-msg">${S.links.length?'':'No sources. <button class="btn bg" onclick="debugSources()" style="margin-left:6px">Debug</button>'}</div>
+        </div>
+        <div class="player-sidebar"><div class="slabel" style="margin-top:0">Episodes</div>${S.episodes.map(ep=>`<div class="ep-item ${ep===S.currentEp?'active':''}" onclick="getLinks('${ep}')">Ep ${ep}</div>`).join('')}</div>
+      </div>`;
+    if(S.links.length)playSrc(0);
+
+  }else if(S.view==='library'){
+    const labels={watching:'Watching',plan_to_watch:'Plan to Watch','break':'On Break',finished:'Finished',dropped:'Dropped'};
+    app.innerHTML=bc([['Home','goHome()'],['Library']])+`
+      <div class="filters" style="margin-bottom:12px">${Object.entries(labels).map(([t,l])=>`<button class="btn bg ${S.libTag===t?'active':''}" onclick="S.libTag='${t}';loadLibrary()">${l}</button>`).join('')}<button class="btn bg ${!S.libTag?'active':''}" onclick="S.libTag='';loadLibrary()">All</button></div>
+      <div id="lib-content"></div>`;
+    loadLibrary();
+
+  }else if(S.view==='bookmarks'){
+    app.innerHTML=bc([['Home','goHome()'],['Bookmarks']])+`<div class="slabel">Bookmarks</div><ul class="list">${S.bookmarks.map((b,i)=>`<li class="li" onclick="loadBm(${i})"><div><span class="t">${b.name}</span><br><span style="font-size:9px;color:var(--text2)">${b.query} · ${b.mode} · ${b.country}</span></div><span class="del" onclick="event.stopPropagation();delBm('${b.id}')">✕</span></li>`).join('')}</ul>${S.bookmarks.length?'':'<div class="status-msg">No bookmarks</div>'}`;
+
+  }else if(S.view==='downloads'){
+    app.innerHTML=bc([['Home','goHome()'],['Downloads']])+`<div class="slabel" style="display:flex;justify-content:space-between;align-items:center"><span>Downloads</span><button class="btn bg" onclick="invoke('open_download_folder')">Open Folder</button></div><ul class="list" id="dl-list"></ul>`;
+    refreshDownloads();
+  }
+  animate();
+}
+</script>
+
+<script>
+// Autocomplete
+function onSearchInput(e){
+  clearTimeout(acTimer);
+  const q=e.target.value.trim();if(q.length<3){document.getElementById('aclist')?.classList.remove('show');return;}
+  acTimer=setTimeout(async()=>{
+    try{const r=await invoke('search_anime',{query:q,mode:S.mode,country:'ALL'});
+    const el=document.getElementById('aclist');if(!el)return;
+    if(!r.length){el.classList.remove('show');return;}
+    el.innerHTML=r.slice(0,8).map(a=>`<div class="ac-item" onclick="S.query='${a.name.replace(/'/g,"\\'")}';document.getElementById('aclist').classList.remove('show');doSearch()">${a.name} <span style="color:var(--text2)">(${a.episodes} ep)</span></div>`).join('');
+    el.classList.add('show');}catch(e){}
+  },400);
+}
+
+function renderCards(){
+  document.getElementById('results').innerHTML=S.results.map((r,i)=>`<div class="card" onclick="openDetail(${i})">${r.thumbnail?`<img class="card-img" src="${r.thumbnail}" onerror="this.style.display='none'"/>`:`<div style="width:100%;aspect-ratio:3/4;background:var(--s2)"></div>`}<div class="card-body"><div class="card-title">${r.name}</div><div class="card-meta">${r.episodes} ep${r.rating?` · ★${r.rating.toFixed(1)}`:''}</div></div></div>`).join('');
+}
+function sortR(){if(S.sort==='name')S.results.sort((a,b)=>a.name.localeCompare(b.name));else if(S.sort==='episodes')S.results.sort((a,b)=>b.episodes-a.episodes);else if(S.sort==='rating')S.results.sort((a,b)=>(b.rating||0)-(a.rating||0));render();}
+
+// Home
+async function loadHome(){
+  function sec(el,label,items){if(!el||!items.length)return;el.innerHTML=`<div class="slabel">${label}</div><div class="cards">${items.map(r=>{const d=JSON.stringify({id:r.id?.toString()||'',name:r.title||r.name||'',thumbnail:r.cover||r.thumbnail||'',episodes:r.episodes||0,rating:r.score||r.rating||0}).replace(/"/g,'&quot;');const img=r.cover||r.thumbnail;return`<div class="card" onclick="openFromHome(${d})">${img?`<img class="card-img" src="${img}" onerror="this.style.display='none'"/>`:`<div style="width:100%;aspect-ratio:3/4;background:var(--s2)"></div>`}<div class="card-body"><div class="card-title">${r.title||r.name||''}</div><div class="card-meta">${r.episodes||0} ep${(r.score||r.rating)?` · ★${(r.score||r.rating).toFixed(1)}`:''}</div></div></div>`;}).join('')}</div>`;}
+  invoke('anilist_trending').then(i=>sec(document.getElementById('recent'),'<i data-lucide="trending-up" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Trending',i)).catch(()=>invoke('get_recently_updated',{mode:S.mode}).then(i=>sec(document.getElementById('recent'),'<i data-lucide="clock" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Recent',i)).catch(()=>{}));
+  invoke('anilist_popular').then(i=>sec(document.getElementById('popular'),'<i data-lucide="flame" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Popular',i)).catch(()=>invoke('get_popular',{mode:S.mode}).then(i=>sec(document.getElementById('popular'),'<i data-lucide="flame" style="width:12px;height:12px;display:inline-block;vertical-align:middle"></i> Popular',i)).catch(()=>{}));
+}
+
+function openFromHome(r){
+  S.anime=r;S.results=[r];S.view='detail';S.episodes=[];
+  S.details={id:r.id,name:r.name,thumbnail:r.thumbnail||'',description:'',genres:[],status:'',episode_count:r.episodes||0,rating:r.rating||0};
+  render();
+}
+async function loadHistory(){try{S.history=await invoke('get_history');const el=document.getElementById('hist');if(!S.history.length){el.innerHTML='';return;}el.innerHTML=`<div class="slabel">Continue Watching</div><ul class="list">${S.history.map((h,i)=>`<li class="li" onclick="resumeH(${i})"><div><span class="t">${h.name}</span><span class="m" style="margin-left:6px">Ep ${h.episode} · ${fmt(h.progress)}</span></div><span class="del" onclick="event.stopPropagation();delH(${i})">✕</span></li>`).join('')}</ul>`;}catch(e){}}
+function fmt(s){const m=Math.floor(s/60),sec=Math.floor(s%60);return m+':'+(sec<10?'0':'')+sec;}
+async function resumeH(i){const h=S.history[i];S.anime={id:h.id,name:h.name};S.mode=h.mode;S.resumeProgress=h.progress;const[d,eps]=await Promise.all([invoke('get_anime_details',{showId:h.id}).catch(()=>null),invoke('get_episodes',{showId:h.id,mode:h.mode})]);if(d)S.details=d;S.episodes=eps;S.view='detail';render();getLinks(h.episode);}
+async function delH(i){const h=S.history[i];await invoke('delete_history',{id:h.id,mode:h.mode});loadHistory();}
+
+// Detail
+async function loadEpisodesInline(){
+  try{
+    let showId=S.anime.id;
+    // If ID is numeric (AniList), search AllAnime by name first
+    if(!isNaN(showId)){
+      const res=await invoke('search_anime',{query:S.anime.name,mode:S.mode,country:'ALL'});
+      if(res.length){showId=res[0].id;S.anime.id=showId;}
+      else{const g=document.getElementById('ep-loading');if(g)g.textContent='Not found on AllAnime';return;}
+    }
+    const eps=await invoke('get_episodes',{showId,mode:S.mode});
+    S.episodes=eps;
+    const g=document.getElementById('epgrid');
+    if(g&&eps.length)g.innerHTML=eps.map(ep=>`<button class="btn bg ep-btn" data-ep="${ep}" onclick="epClick('${ep}',event)">${ep}</button>`).join('');
+    else if(g)g.innerHTML='<div class="status-msg">No episodes found</div>';
+  }catch(e){const g=document.getElementById('ep-loading');if(g)g.textContent='Error loading episodes';}
+}
+async function openDetail(i){
+  S.anime=S.results[i];S.view='detail';S.episodes=[];
+  S.details={id:S.anime.id,name:S.anime.name,thumbnail:S.anime.thumbnail||'',description:'',genres:[],status:'',episode_count:S.anime.episodes,rating:S.anime.rating||0};
+  render();
+  try{const eps=await invoke('get_episodes',{showId:S.anime.id,mode:S.mode});S.episodes=eps;render();const d=await invoke('get_anime_details',{showId:S.anime.id});S.details={...S.details,...d};render();}catch(e){}
+}
+
+// Player
+function prevEp(){const i=S.episodes.indexOf(S.currentEp);if(i>0)getLinks(S.episodes[i-1]);}
+function nextEp(){const i=S.episodes.indexOf(S.currentEp);if(i<S.episodes.length-1)getLinks(S.episodes[i+1]);}
+function animProg(){let p=0;clearInterval(progAnim);progAnim=setInterval(()=>{p=Math.min(p+Math.random()*6,92);const b=document.getElementById('pbar');if(b)b.style.width=p+'%';},250);}
+
+async function playSrc(i){
+  const v=document.getElementById('vp');if(!v)return;
+  document.querySelectorAll('.qbtn').forEach((b,idx)=>{b.classList.toggle('bp',idx===i);b.classList.toggle('bg',idx!==i);});
+  if(window._hls){window._hls.destroy();window._hls=null;}
+  let url=S.links[i].url;
+  if(!url.includes('.m3u8')){try{url=await invoke('set_proxy_url',{url,referrer:'https://allmanga.to'});}catch(e){}}
+  if(url.includes('.m3u8')){
+    if(Hls.isSupported()){const hls=new Hls();hls.loadSource(url);hls.attachMedia(v);hls.on(Hls.Events.MANIFEST_PARSED,()=>{seekR(v);v.play();});hls.on(Hls.Events.ERROR,(_,d)=>{if(d.fatal)document.getElementById('status').textContent='Playback error';});window._hls=hls;}
+    else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=url;v.onloadedmetadata=()=>seekR(v);}
+  }else{v.src=url;v.onloadedmetadata=()=>seekR(v);v.play();}
+  clearInterval(saveInt);saveInt=setInterval(()=>saveP(v),5000);
+  v.onpause=()=>{saveP(v);updPlay();document.getElementById('pwrap')?.classList.add('paused');};
+  v.onplay=()=>{updPlay();document.getElementById('pwrap')?.classList.remove('paused');};
+  v.onended=()=>{saveP(v);if(S.autoNext)nextEp();};
+  v.ontimeupdate=()=>updSeek(v);v.onprogress=()=>updBuf(v);
+}
+
+// Player controls
+function togglePlay(){const v=document.getElementById('vp');if(!v)return;v.paused?v.play():v.pause();}
+function updPlay(){const v=document.getElementById('vp'),ico=document.getElementById('playico');if(!v||!ico)return;ico.setAttribute('d',v.paused?'M8 5v14l11-7z':'M6 19h4V5H6v14zm8-14v14h4V5h-4z');}
+function skip(s){const v=document.getElementById('vp');if(v)v.currentTime=Math.max(0,Math.min(v.duration||0,v.currentTime+s));}
+function seek(e){const v=document.getElementById('vp'),bar=document.getElementById('seekbar');if(!v||!bar||!v.duration)return;const r=bar.getBoundingClientRect();v.currentTime=(e.clientX-r.left)/r.width*v.duration;}
+function updSeek(v){const p=document.getElementById('seekprog'),t=document.getElementById('ctime');if(!p||!v.duration)return;p.style.width=(v.currentTime/v.duration*100)+'%';t.textContent=fmtT(v.currentTime)+' / '+fmtT(v.duration);}
+function updBuf(v){const b=document.getElementById('seekbuf');if(!b||!v.buffered.length||!v.duration)return;b.style.width=(v.buffered.end(v.buffered.length-1)/v.duration*100)+'%';}
+function fmtT(s){const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);return(h?h+':':'')+(h&&m<10?'0':'')+m+':'+(sec<10?'0':'')+sec;}
+function setVol(val){const v=document.getElementById('vp');if(v){v.volume=val;v.muted=false;}}
+function toggleMute(){const v=document.getElementById('vp');if(v)v.muted=!v.muted;}
+const speeds=[.5,.75,1,1.25,1.5,2];let spdIdx=2;
+function cycleSpeed(){spdIdx=(spdIdx+1)%speeds.length;const v=document.getElementById('vp'),b=document.getElementById('speedbtn');if(v)v.playbackRate=speeds[spdIdx];if(b)b.textContent=speeds[spdIdx]+'x';}
+function toggleFS(){const w=document.getElementById('pwrap');if(!w)return;document.fullscreenElement?document.exitFullscreen():w.requestFullscreen();}
+function seekR(v){if(S.resumeProgress&&S.resumeProgress>5){v.currentTime=S.resumeProgress;S.resumeProgress=null;}}
+async function saveP(v){if(!v||!S.anime||!S.currentEp)return;const p=v.currentTime||0;if(p<2)return;await invoke('save_history',{id:S.anime.id,name:S.anime.name,episode:S.currentEp,mode:S.mode,progress:p}).catch(()=>{});}
+
+// Keyboard shortcuts (YouTube-like)
+document.addEventListener('keydown',e=>{
+  if(S.view!=='player'||e.target.tagName==='INPUT')return;
+  const v=document.getElementById('vp');if(!v)return;
+  switch(e.key){
+    case ' ':case 'k':e.preventDefault();togglePlay();break;
+    case 'ArrowLeft':case 'j':e.preventDefault();skip(-5);break;
+    case 'ArrowRight':case 'l':e.preventDefault();skip(5);break;
+    case 'ArrowUp':e.preventDefault();v.volume=Math.min(1,v.volume+.1);break;
+    case 'ArrowDown':e.preventDefault();v.volume=Math.max(0,v.volume-.1);break;
+    case 'f':e.preventDefault();toggleFS();break;
+    case 'm':e.preventDefault();toggleMute();break;
+    case 'n':if(e.shiftKey){e.preventDefault();nextEp();}break;
+    case 'p':if(e.shiftKey){e.preventDefault();prevEp();}break;
+    case '>':e.preventDefault();cycleSpeed();break;
+  }
+});
+
+// Animations
+function bc(items){return`<div class="breadcrumbs">${items.map((it,i)=>i<items.length-1?`<span onclick="${it[1]}">${it[0]}</span><span class="sep">›</span>`:`<span class="current">${it[0]}</span>`).join('')}</div>`;}
+
+function animate(){
+  const app=document.getElementById('app');
+  if(window.lucide)try{lucide.createIcons();}catch(e){}
+  if(!window.gsap){app.style.opacity='1';return;}
+  gsap.fromTo(app,{opacity:0,y:8},{opacity:1,y:0,duration:.3,ease:'power2.out'});
+  gsap.from('.card',{y:20,opacity:0,duration:.35,stagger:.04,ease:'power2.out',delay:.15});
+  gsap.from('.li',{x:-15,opacity:0,duration:.3,stagger:.05,ease:'power2.out',delay:.1});
+  gsap.from('.detail',{y:15,opacity:0,duration:.4,ease:'power2.out',delay:.1});
+  gsap.from('.player-wrap',{scale:.97,opacity:0,duration:.4,ease:'power2.out',delay:.1});
+  gsap.from('.player-sidebar',{x:20,opacity:0,duration:.35,ease:'power2.out',delay:.2});
+  gsap.from('.epgrid .btn',{scale:.8,opacity:0,duration:.25,stagger:.02,ease:'back.out(1.5)',delay:.15});
+  gsap.from('.filters',{y:-10,opacity:0,duration:.3,ease:'power2.out'});
+  gsap.from('.loader',{opacity:0,duration:.3,ease:'power2.out'});
+  gsap.from('.pbar',{y:10,opacity:0,duration:.3,ease:'power2.out',delay:.25});
+  gsap.from('.qrow',{y:10,opacity:0,duration:.3,ease:'power2.out',delay:.3});
+}
+
+// Transition wrapper - animates out then switches view
+function transitionTo(newView,cb){
+  const app=document.getElementById('app');
+  gsap.to(app,{opacity:0,y:-8,duration:.15,ease:'power2.in',onComplete:()=>{
+    if(cb)cb();
+    else{S.view=newView;render();}
+  }});
+}
+
+// Navigation
+function goHome(){transitionTo('home',()=>{S.view='home';S.results=[];S.query='';render();});}
+function goSearch(){S.view='search';render();}
+function goDetail(){S.view='detail';render();}async function doSearch(){S.query=document.getElementById('q')?.value?.trim()||S.query;if(!S.query)return;document.getElementById('aclist')?.classList.remove('show');transitionTo('search',async()=>{S.view='search';render();document.getElementById('status').textContent='Searching...';try{S.results=await invoke('search_anime',{query:S.query,mode:S.mode,country:S.country});if(S.sort!=='default')sortR();else{renderCards();document.getElementById('status').textContent=S.results.length?'':'No results.';animate();}}catch(e){document.getElementById('status').textContent='Error: '+e;}});}
+async function getLinks(ep){S.currentEp=ep;S.links=[];transitionTo('loading',async()=>{S.view='loading';render();try{S.links=await invoke('get_episode_url',{showId:S.anime.id,episode:ep,mode:S.mode,quality:'best',title:S.anime.name||''});clearInterval(progAnim);S.view='player';render();}catch(e){clearInterval(progAnim);const t=document.getElementById('ptxt');if(t)t.textContent='Error: '+e;}});}
+
+// Library
+async function addToLibrary(tag){if(!tag||!S.anime)return;await invoke('save_history',{id:S.anime.id,name:S.anime.name||S.details?.name||'',episode:'1',mode:S.mode,progress:0});await invoke('set_history_tag',{id:S.anime.id,mode:S.mode,tag});if(S.details?.thumbnail)await invoke('set_history_thumbnail',{id:S.anime.id,mode:S.mode,thumbnail:S.details.thumbnail});}
+async function showLibrary(){S.libTag='';transitionTo('library',()=>{S.view='library';render();});}
+async function loadLibrary(){
+  const items=S.libTag?await invoke('get_history_by_tag',{tag:S.libTag}):await invoke('get_history');
+  const el=document.getElementById('lib-content');if(!el)return;
+  if(!items.length){el.innerHTML='<div class="status-msg">Nothing here yet</div>';return;}
+  const tags={watching:'eye',plan_to_watch:'clock',break:'pause',finished:'check-circle',dropped:'x-circle'};
+  el.innerHTML=`<ul class="list">${items.map(h=>`<li class="li" onclick="resumeH2('${h.id}','${h.mode}')">
+    <div style="display:flex;align-items:center;gap:8px">
+      ${h.thumbnail?`<img src="${h.thumbnail}" style="width:36px;height:50px;object-fit:cover;border-radius:4px"/>`:''}
+      <div><span class="t">${h.name}</span><br><span style="font-size:9px;color:var(--text2)">Ep ${h.episode} · ${fmt(h.progress)} <i data-lucide="${tags[h.tag]||'circle'}" style="width:10px;height:10px;display:inline-block;vertical-align:middle"></i></span></div>
+    </div>
+    <div style="display:flex;gap:4px;align-items:center">
+      <select class="sinput" style="width:auto;padding:3px 6px;font-size:9px" onchange="setTag('${h.id}','${h.mode}',this.value)" onclick="event.stopPropagation()">
+        <option value="watching" ${h.tag==='watching'?'selected':''}>Watching</option>
+        <option value="plan_to_watch" ${h.tag==='plan_to_watch'?'selected':''}>Plan to Watch</option>
+        <option value="break" ${h.tag==='break'?'selected':''}>On Break</option>
+        <option value="finished" ${h.tag==='finished'?'selected':''}>Finished</option>
+        <option value="dropped" ${h.tag==='dropped'?'selected':''}>Dropped</option>
+      </select>
+      <span class="del" onclick="event.stopPropagation();delH2('${h.id}','${h.mode}')">✕</span>
+    </div>
+  </li>`).join('')}</ul>`;
+  if(window.lucide)try{lucide.createIcons();}catch(e){}
+}
+async function setTag(id,mode,tag){await invoke('set_history_tag',{id,mode,tag});loadLibrary();}
+async function delH2(id,mode){await invoke('delete_history',{id,mode});loadLibrary();}
+async function resumeH2(id,mode){const items=await invoke('get_history');const h=items.find(e=>e.id===id&&e.mode===mode);if(!h)return;S.anime={id:h.id,name:h.name};S.mode=h.mode;S.resumeProgress=h.progress;const eps=await invoke('get_episodes',{showId:h.id,mode:h.mode});S.episodes=eps;S.view='detail';S.details={id:h.id,name:h.name,thumbnail:h.thumbnail||'',description:'',genres:[],status:'',episode_count:eps.length,rating:0};render();getLinks(h.episode);}
+
+// Bookmarks
+async function showBookmarks(){S.bookmarks=await invoke('get_bookmarks');transitionTo('bookmarks',()=>{S.view='bookmarks';render();});}
+async function delBm(id){await invoke('delete_bookmark',{id});S.bookmarks=await invoke('get_bookmarks');render();}
+function loadBm(i){const b=S.bookmarks[i];S.query=b.query;S.mode=b.mode;S.country=b.country;S.sort=b.sort;doSearch();}
+function openSaveBookmark(){const q=document.getElementById('q')?.value||S.query;const o=document.createElement('div');o.className='modal-overlay';o.innerHTML=`<div class="modal"><h3>Save Bookmark</h3><input class="sinput" id="bmn" placeholder="Name..." value="${q} (${S.mode}/${S.country})"/><div class="modal-actions"><button class="btn bg" onclick="this.closest('.modal-overlay').remove()">Cancel</button><button class="btn bp" onclick="doSaveBm()">Save</button></div></div>`;document.body.appendChild(o);}
+async function doSaveBm(){const n=document.getElementById('bmn').value;await invoke('save_bookmark',{name:n,query:S.query,mode:S.mode,country:S.country,sort:S.sort});document.querySelector('.modal-overlay')?.remove();}
+
+// Debug
+async function debugSources(){const el=document.getElementById('status');if(el)el.innerHTML='Debugging...';try{const d=await invoke('debug_episode_url',{showId:S.anime.id,episode:S.currentEp,mode:S.mode});if(el)el.innerHTML=`<pre style="font-size:9px;color:var(--text2);background:var(--s1);padding:10px;border-radius:8px;overflow:auto;max-height:250px;text-align:left;white-space:pre-wrap">GET: ${d.get_url}\nLen: ${d.get_response_len}\nSnippet: ${d.get_response_snippet?.slice(0,200)}\nPOST fallback: ${d.used_post_fallback}\ntobeparsed: ${d.has_tobeparsed}\nSources: ${d.sources_count}\n${JSON.stringify(d.sources,null,1)}\nProviders: ${JSON.stringify(d.decoded_provider_ids,null,1)}\nLinks: ${JSON.stringify(d.links_per_provider,null,1)}</pre>`;}catch(e){if(el)el.textContent='Debug error: '+e;}}
+
+// Downloads
+let bulkMode=false,selectedEps=new Set();
+function toggleBulk(){bulkMode=!bulkMode;selectedEps.clear();const b=document.getElementById('bulkbtn'),d=document.getElementById('dlselbtn');if(b)b.textContent=bulkMode?'Cancel':'Select';if(d)d.style.display=bulkMode?'inline-flex':'none';document.querySelectorAll('.ep-btn').forEach(b=>b.classList.remove('active'));}
+function epClick(ep,e){if(!bulkMode){getLinks(ep);return;}if(selectedEps.has(ep)){selectedEps.delete(ep);e.target.classList.remove('active');}else{selectedEps.add(ep);e.target.classList.add('active');}const d=document.getElementById('dlselbtn');if(d)d.textContent=`↓ DL (${selectedEps.size})`;}
+async function downloadSelected(){if(!selectedEps.size)return;await invoke('start_bulk_download',{animeId:S.anime.id,animeName:S.anime.name||S.details?.name||'',episodes:[...selectedEps],mode:S.mode});toggleBulk();showDownloads();}
+async function showDownloads(){transitionTo('downloads',()=>{S.view='downloads';render();});}
+let dlRef=null;
+async function refreshDownloads(){const items=await invoke('get_downloads');const el=document.getElementById('dl-list');if(!el)return;if(!items.length){el.innerHTML='<div class="status-msg">No downloads</div>';return;}el.innerHTML=items.map(d=>`<li class="li" style="flex-direction:column;align-items:stretch;gap:4px"><div style="display:flex;justify-content:space-between;align-items:center"><span class="t">${d.anime_name} Ep ${d.episode}</span><div style="display:flex;gap:4px;align-items:center">${d.status==='Downloading'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('cancel_download',{id:'${d.id}'})">Cancel</button>`:''}${d.status==='Done'||d.status==='Failed'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('remove_download',{id:'${d.id}'}).then(refreshDownloads)">Remove</button>`:''}<span class="m">${d.status}</span></div></div>${d.status==='Downloading'||d.status==='Queued'?`<div style="width:100%;height:2px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:${d.progress}%;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .3s"></div></div>`:''}</li>`).join('');if(items.some(d=>d.status==='Downloading'||d.status==='Queued')){clearTimeout(dlRef);dlRef=setTimeout(refreshDownloads,1500);}}
+
+render();
+</script>
+</body>
+</html>
