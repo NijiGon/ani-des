@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Rust unit tests
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Frontend and config syntax
+        shell: bash
+        run: |
+          node --check src/app.js
+          node --check tests/frontend/serve.js
+          node --check tests/frontend/serve-app.js
+          node --check tests/frontend/mock-tauri.js
+          node --check tests/frontend/tests.js
+          node -e "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8'))"

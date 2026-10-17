@@ -16,9 +16,8 @@ use std::sync::Arc;
 use tauri::Manager;
 use anilist::{anilist_trending, anilist_popular, anilist_seasonal, anilist_search, anilist_detail, anilist_genres};
 use aniskip::get_skip_times;
-use api::{search_anime, get_episodes, get_episode_url, get_cache_stats, clear_cache, get_anime_details, get_popular, get_recently_updated, debug_episode_url, get_thumbnail_fallback, get_mal_id, AppCache};
+use api::{search_anime, get_episodes, get_episode_url, get_cache_stats, clear_cache, get_anime_details, get_popular, get_recently_updated, debug_episode_url, get_thumbnail_fallback, AppCache};
 use bookmarks::{save_bookmark, get_bookmarks, delete_bookmark};
-use consumet::get_fallback_episode;
 use downloads::{start_download, start_bulk_download, get_downloads, cancel_download, remove_download, open_download_folder, open_file, DownloadManager};
 use history::{save_history, get_history, get_history_by_tag, set_history_tag, set_history_thumbnail, delete_history, get_all_tags};
 use jikan::{jikan_search, jikan_top, jikan_genres, jikan_detail};
@@ -53,12 +52,12 @@ fn main() {
             search_anime, get_episodes, get_episode_url,
             get_cache_stats, clear_cache, get_anime_details,
             get_popular, get_recently_updated,
-            debug_episode_url, get_thumbnail_fallback, get_mal_id,
+            debug_episode_url, get_thumbnail_fallback,
             anilist_trending, anilist_popular, anilist_seasonal,
             anilist_search, anilist_detail, anilist_genres,
             jikan_search, jikan_top, jikan_genres, jikan_detail,
             get_skip_times,
-            get_fallback_episode,
+
             save_history, get_history, get_history_by_tag, set_history_tag, set_history_thumbnail, delete_history, get_all_tags,
             save_bookmark, get_bookmarks, delete_bookmark,
             start_download, start_bulk_download, get_downloads,

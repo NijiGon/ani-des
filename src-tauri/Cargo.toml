@@ -15,6 +15,7 @@ base64 = "0.22"
 aes = "0.8"
 ctr = "0.9"
 sha2 = "0.10"
+cbc = { version = "0.1", features = ["block-padding", "alloc"] }
 rand = "0.8"
 tokio = { version = "1", features = ["full"] }
 urlencoding = "2"

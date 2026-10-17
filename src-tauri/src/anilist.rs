@@ -3,9 +3,7 @@ use serde::{Deserialize, Serialize};
 
 const ANILIST_API: &str = "https://graphql.anilist.co";
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap()
-}
+use crate::api::http as client;
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AniListMedia {

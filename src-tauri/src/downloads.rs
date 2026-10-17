@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::store;
 
 const DOWNLOADS_FILE: &str = "downloads.json";
+const SITE_REFERRER: &str = "https://allmanga.to";
 const AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0";
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -132,16 +133,18 @@ fn fail(items: &Arc<Mutex<Vec<DownloadItem>>>, id: &str, msg: String) {
 async fn do_download(id: String, anime_id: String, anime_name: String, episode: String, mode: String, items: Arc<Mutex<Vec<DownloadItem>>>, cancel: &mut mpsc::Receiver<()>) {
     update_item(&items, &id, |i| { i.status = DownloadStatus::Downloading; i.progress = 5.0; });
 
-    let links = match get_links_for_download(&anime_id, &episode, &mode).await {
+    let links = match get_links_for_download(&anime_id, &anime_name, &episode, &mode).await {
         Ok(l) => l,
         Err(e) => return fail(&items, &id, e),
     };
-    let Some(url) = links.first().cloned() else {
+    let Some(link) = links.first().cloned() else {
         return fail(&items, &id, "No video sources found".to_string());
     };
-    if url.contains(".m3u8") {
-        return download_hls(&id, &anime_name, &episode, &url, &items, cancel).await;
+    let referrer = link.referrer.clone().unwrap_or_else(|| SITE_REFERRER.to_string());
+    if link.url.contains(".m3u8") {
+        return download_hls(&id, &anime_name, &episode, &link.url, &referrer, &items, cancel).await;
     }
+    let url = link.url;
 
     update_item(&items, &id, |i| i.progress = 15.0);
 
@@ -152,7 +155,7 @@ async fn do_download(id: String, anime_id: String, anime_name: String, episode: 
     // Connect timeout only: a whole-download timeout would kill long files on slow links.
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build().unwrap();
     let resp = match client.get(&url)
-        .header("Referer", "https://allmanga.to")
+        .header("Referer", referrer.as_str())
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0")
         .send().await {
         Ok(r) => r,
@@ -201,15 +204,18 @@ async fn do_download(id: String, anime_id: String, anime_name: String, episode: 
     });
 }
 
-/// Direct (non-HLS) file URLs for an episode, in provider order.
-async fn get_links_for_download(show_id: &str, episode: &str, mode: &str) -> Result<Vec<String>, String> {
+/// Playable links for an episode: AllAnime first, Gogoanime when AllAnime has none. Direct files come before HLS.
+async fn get_links_for_download(show_id: &str, title: &str, episode: &str, mode: &str) -> Result<Vec<crate::api::EpisodeLink>, String> {
     let fetch = crate::api::fetch_source_list(show_id, episode, mode).await?;
     let sources = crate::api::parse_sources(&fetch.api_resp);
-    let links = crate::api::resolve_sources(&sources).await;
-    let mut urls: Vec<String> = links.into_iter().map(|l| l.url).collect();
-    // Direct files first; HLS playlists are used only when no direct file exists.
-    urls.sort_by_key(|u| u.contains(".m3u8"));
-    Ok(urls)
+    let mut links = crate::api::resolve_sources(&sources).await;
+    if links.is_empty() {
+        links = crate::consumet::get_fallback_sources(title, episode).await.into_iter()
+            .map(|s| crate::api::EpisodeLink { quality: format!("gogo-{}", s.quality), url: s.url, referrer: Some(s.referrer) })
+            .collect();
+    }
+    links.sort_by_key(|l| l.url.contains(".m3u8"));
+    Ok(links)
 }
 
 /// Chooses the highest-bandwidth variant of a master playlist; None for a media playlist.
@@ -232,25 +238,96 @@ pub fn pick_variant(base: &reqwest::Url, text: &str) -> Option<reqwest::Url> {
     best.and_then(|(_, uri)| base.join(&uri).ok())
 }
 
-/// Segment (duration seconds, absolute URL) pairs of a media playlist.
-pub fn parse_media_playlist(base: &reqwest::Url, text: &str) -> Result<Vec<(f64, String)>, String> {
-    if text.lines().any(|l| l.starts_with("#EXT-X-KEY:") && !l.contains("METHOD=NONE")) {
-        return Err("Encrypted HLS streams cannot be downloaded yet".to_string());
+/// One media segment; `key` is set when the stream is AES-128 encrypted.
+pub struct HlsSegment { pub duration: f64, pub url: String, pub key: Option<HlsKey> }
+
+pub struct HlsKey { pub uri: String, pub iv: [u8; 16] }
+
+/// Splits an HLS attribute list (KEY=VALUE pairs, values optionally quoted).
+fn parse_attrs(s: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = s.trim();
+    while let Some((key, after)) = rest.split_once('=') {
+        let (value, next) = match after.strip_prefix('"') {
+            Some(quoted) => match quoted.find('"') {
+                Some(end) => (&quoted[..end], &quoted[end + 1..]),
+                None => (quoted, ""),
+            },
+            None => match after.find(',') {
+                Some(end) => (&after[..end], &after[end..]),
+                None => (after, ""),
+            },
+        };
+        out.push((key.trim().to_string(), value.to_string()));
+        rest = next.trim_start_matches(|c| c == ',' || c == ' ');
     }
+    out
+}
+
+fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+}
+
+/// Parses an `IV=0x...` attribute (32 hex digits).
+fn parse_iv(hex: &str) -> Option<[u8; 16]> {
+    let hex = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X"))?;
+    if hex.len() != 32 { return None; }
+    let mut iv = [0u8; 16];
+    for (i, byte) in iv.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(iv)
+}
+
+pub fn parse_media_playlist(base: &reqwest::Url, text: &str) -> Result<Vec<HlsSegment>, String> {
     if text.contains("#EXT-X-MAP:") {
         return Err("Fragmented HLS streams cannot be downloaded yet".to_string());
     }
+    let mut sequence_base: u64 = 0;
+    let mut key: Option<(String, Option<[u8; 16]>)> = None;
     let mut segments = Vec::new();
     let mut duration = None;
     for line in text.lines().map(str::trim) {
-        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+        if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+            sequence_base = rest.trim().parse().unwrap_or(0);
+        } else if let Some(rest) = line.strip_prefix("#EXT-X-KEY:") {
+            let attrs = parse_attrs(rest);
+            match attr(&attrs, "METHOD") {
+                Some("NONE") | None => key = None,
+                Some("AES-128") => {
+                    let uri = attr(&attrs, "URI").ok_or("Encryption key has no URI")?;
+                    let uri = base.join(uri).map_err(|e| e.to_string())?.to_string();
+                    key = Some((uri, attr(&attrs, "IV").and_then(parse_iv)));
+                }
+                Some(other) => return Err(format!("{} encryption is not supported", other)),
+            }
+        } else if let Some(rest) = line.strip_prefix("#EXTINF:") {
             duration = rest.split(',').next().and_then(|d| d.trim().parse::<f64>().ok());
         } else if !line.is_empty() && !line.starts_with('#') {
-            let uri = base.join(line).map_err(|e| e.to_string())?;
-            segments.push((duration.take().unwrap_or(0.0), uri.to_string()));
+            let index = sequence_base + segments.len() as u64;
+            let url = base.join(line).map_err(|e| e.to_string())?.to_string();
+            let key = key.as_ref().map(|(uri, iv)| HlsKey {
+                uri: uri.clone(),
+                // Without an explicit IV the spec uses the segment's media sequence number.
+                iv: iv.unwrap_or_else(|| {
+                    let mut bytes = [0u8; 16];
+                    bytes[8..].copy_from_slice(&index.to_be_bytes());
+                    bytes
+                }),
+            });
+            segments.push(HlsSegment { duration: duration.take().unwrap_or(0.0), url, key });
         }
     }
     Ok(segments)
+}
+
+/// Decrypts one AES-128-CBC segment with PKCS#7 padding.
+fn decrypt_segment(data: &[u8], key: &[u8], iv: &[u8; 16]) -> Result<Vec<u8>, String> {
+    use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv)
+        .map_err(|_| "Bad encryption key".to_string())?
+        .decrypt_padded_vec_mut::<Pkcs7>(data)
+        .map_err(|_| "Could not decrypt segment".to_string())
 }
 
 /// Playlist written beside a downloaded transport stream; the proxy serves it to the player.
@@ -261,37 +338,37 @@ fn sidecar_playlist(ts_name: &str, total_secs: f64) -> String {
     )
 }
 
-fn site_headers() -> reqwest::header::HeaderMap {
+fn site_headers(referrer: &str) -> reqwest::header::HeaderMap {
     let mut h = reqwest::header::HeaderMap::new();
-    h.insert(reqwest::header::REFERER, reqwest::header::HeaderValue::from_static("https://allmanga.to"));
+    h.insert(reqwest::header::REFERER, reqwest::header::HeaderValue::from_str(referrer).unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(SITE_REFERRER)));
     h.insert(reqwest::header::USER_AGENT, reqwest::header::HeaderValue::from_static(AGENT));
     h
 }
 
-async fn fetch_text(client: &reqwest::Client, url: &reqwest::Url) -> Result<String, String> {
-    let resp = client.get(url.clone()).headers(site_headers()).send().await.map_err(|e| e.to_string())?;
+async fn fetch_text(client: &reqwest::Client, url: &reqwest::Url, referrer: &str) -> Result<String, String> {
+    let resp = client.get(url.clone()).headers(site_headers(referrer)).send().await.map_err(|e| e.to_string())?;
     resp.error_for_status().map_err(|e| e.to_string())?.text().await.map_err(|e| e.to_string())
 }
 
-async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
-    let resp = client.get(url).headers(site_headers()).send().await.map_err(|e| e.to_string())?;
+async fn fetch_bytes(client: &reqwest::Client, url: &str, referrer: &str) -> Result<Vec<u8>, String> {
+    let resp = client.get(url).headers(site_headers(referrer)).send().await.map_err(|e| e.to_string())?;
     let bytes = resp.error_for_status().map_err(|e| e.to_string())?.bytes().await.map_err(|e| e.to_string())?;
     Ok(bytes.to_vec())
 }
 
 /// Downloads every segment of an HLS stream into one `.ts` file plus a playlist beside it.
-async fn download_hls(id: &str, anime_name: &str, episode: &str, url: &str, items: &Arc<Mutex<Vec<DownloadItem>>>, cancel: &mut mpsc::Receiver<()>) {
+async fn download_hls(id: &str, anime_name: &str, episode: &str, url: &str, referrer: &str, items: &Arc<Mutex<Vec<DownloadItem>>>, cancel: &mut mpsc::Receiver<()>) {
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build().unwrap();
     let mut base = match reqwest::Url::parse(url) {
         Ok(u) => u,
         Err(e) => return fail(items, id, e.to_string()),
     };
-    let mut text = match fetch_text(&client, &base).await {
+    let mut text = match fetch_text(&client, &base, referrer).await {
         Ok(t) => t,
         Err(e) => return fail(items, id, e),
     };
     if let Some(variant) = pick_variant(&base, &text) {
-        text = match fetch_text(&client, &variant).await {
+        text = match fetch_text(&client, &variant, referrer).await {
             Ok(t) => t,
             Err(e) => return fail(items, id, e),
         };
@@ -304,7 +381,7 @@ async fn download_hls(id: &str, anime_name: &str, episode: &str, url: &str, item
     if segments.is_empty() {
         return fail(items, id, "Stream playlist has no segments".to_string());
     }
-    let total_secs: f64 = segments.iter().map(|(d, _)| d).sum();
+    let total_secs: f64 = segments.iter().map(|seg| seg.duration).sum();
 
     let dir = download_dir().join(sanitize(anime_name));
     fs::create_dir_all(&dir).ok();
@@ -317,21 +394,37 @@ async fn download_hls(id: &str, anime_name: &str, episode: &str, url: &str, item
     };
 
     use std::io::Write;
+    let mut keys: HashMap<String, Vec<u8>> = HashMap::new();
     let count = segments.len();
     let mut downloaded: u64 = 0;
-    for (i, (_, uri)) in segments.iter().enumerate() {
+    for (i, seg) in segments.iter().enumerate() {
         let bytes = tokio::select! {
             Some(_) = cancel.recv() => {
                 fs::remove_file(&ts_path).ok();
                 return fail(items, id, "Cancelled".to_string());
             }
-            r = fetch_bytes(&client, uri) => r,
+            r = fetch_bytes(&client, &seg.url, referrer) => r,
         };
         let bytes = match bytes {
             Ok(b) => b,
             Err(e) => {
                 fs::remove_file(&ts_path).ok();
                 return fail(items, id, e);
+            }
+        };
+        let bytes = match &seg.key {
+            None => bytes,
+            Some(key) => {
+                if !keys.contains_key(&key.uri) {
+                    match fetch_bytes(&client, &key.uri, referrer).await {
+                        Ok(k) => { keys.insert(key.uri.clone(), k); }
+                        Err(e) => { fs::remove_file(&ts_path).ok(); return fail(items, id, e); }
+                    }
+                }
+                match decrypt_segment(&bytes, &keys[&key.uri], &key.iv) {
+                    Ok(plain) => plain,
+                    Err(e) => { fs::remove_file(&ts_path).ok(); return fail(items, id, e); }
+                }
             }
         };
         if file.write_all(&bytes).is_err() {
@@ -415,20 +508,37 @@ mod tests {
     fn parses_media_playlist_segments() {
         let base = reqwest::Url::parse("https://cdn.example/a/index.m3u8").unwrap();
         let text = "#EXTM3U\n#EXTINF:4.5,\nseg1.ts\n#EXTINF:3.0,\nhttps://other.example/seg2.ts\n#EXT-X-ENDLIST\n";
-        assert_eq!(
-            parse_media_playlist(&base, text).unwrap(),
-            vec![(4.5, "https://cdn.example/a/seg1.ts".to_string()), (3.0, "https://other.example/seg2.ts".to_string())]
-        );
+        let segs: Vec<(f64, String)> = parse_media_playlist(&base, text).unwrap().into_iter().map(|s| (s.duration, s.url)).collect();
+        assert_eq!(segs, vec![(4.5, "https://cdn.example/a/seg1.ts".to_string()), (3.0, "https://other.example/seg2.ts".to_string())]);
     }
 
     #[test]
     fn rejects_encrypted_and_fragmented_playlists() {
         let base = reqwest::Url::parse("https://cdn.example/index.m3u8").unwrap();
-        let aes = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:4,\na.ts\n";
+        let sample = "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n#EXTINF:4,\na.ts\n";
         let map = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\na.m4s\n";
-        assert!(parse_media_playlist(&base, aes).is_err());
+        assert!(parse_media_playlist(&base, sample).is_err());
         assert!(parse_media_playlist(&base, map).is_err());
         assert!(parse_media_playlist(&base, "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\na.ts\n").is_ok());
+    }
+
+    #[test]
+    fn decrypts_aes128_segments_and_derives_iv() {
+        use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        let key = [9u8; 16];
+        let iv = [1u8; 16];
+        let plain = b"transport stream bytes".to_vec();
+        let encrypted = cbc::Encryptor::<aes::Aes128>::new_from_slices(&key, &iv).unwrap().encrypt_padded_vec_mut::<Pkcs7>(&plain);
+        assert_eq!(decrypt_segment(&encrypted, &key, &iv).unwrap(), plain);
+
+        let base = reqwest::Url::parse("https://cdn.example/index.m3u8").unwrap();
+        let text = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-KEY:METHOD=AES-128,URI=\"keys/k.bin\",IV=0x000102030405060708090a0b0c0d0e0f\n#EXTINF:4,\na.ts\n#EXTINF:4,\nb.ts\n#EXT-X-KEY:METHOD=AES-128,URI=\"keys/k.bin\"\n#EXTINF:4,\nc.ts\n";
+        let segs = parse_media_playlist(&base, text).unwrap();
+        let first = segs[0].key.as_ref().unwrap();
+        assert_eq!(first.uri, "https://cdn.example/keys/k.bin");
+        assert_eq!(first.iv[15], 0x0f);
+        // c.ts has no IV attribute, so its IV is its media sequence number (7 + 2).
+        assert_eq!(segs[2].key.as_ref().unwrap().iv[15], 9);
     }
 
     #[test]

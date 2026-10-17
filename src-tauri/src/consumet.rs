@@ -11,11 +11,7 @@ pub struct FallbackSource {
     pub referrer: String,
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
-        .build().unwrap()
-}
+use crate::api::http as client;
 
 /// Search Gogoanime for an anime and get streaming URL for an episode
 pub async fn get_fallback_sources(title: &str, episode: &str) -> Vec<FallbackSource> {
@@ -70,9 +66,4 @@ pub async fn get_fallback_sources(title: &str, episode: &str) -> Vec<FallbackSou
     }
 
     sources
-}
-
-#[tauri::command]
-pub async fn get_fallback_episode(title: String, episode: String) -> Result<Vec<FallbackSource>, String> {
-    Ok(get_fallback_sources(&title, &episode).await)
 }

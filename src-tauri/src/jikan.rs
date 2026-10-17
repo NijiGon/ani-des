@@ -6,9 +6,7 @@ pub const JIKAN_BASE: &str = "https://api.jikan.moe/v4";
 // Jikan allows about 3 requests/second; keep a safe gap between request starts.
 const MIN_GAP: Duration = Duration::from_millis(400);
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap()
-}
+use crate::api::http as client;
 
 fn gate() -> &'static tokio::sync::Mutex<Option<Instant>> {
     static GATE: OnceLock<tokio::sync::Mutex<Option<Instant>>> = OnceLock::new();

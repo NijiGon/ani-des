@@ -5,7 +5,6 @@ use reqwest::header::{HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,7 +21,6 @@ const ALLANIME_BASE: &str = "allanime.day";
 const ALLANIME_KEY_INPUT: &str = "Xot36i3lK3:v1";
 const EPISODE_QUERY_HASH: &str = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
 const EPISODE_GQL: &str = r#"query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { episode( showId: $showId translationType: $translationType episodeString: $episodeString ) { episodeString sourceUrls }}"#;
-const MAL_MAP_FILE: &str = "mal_mappings.json";
 const CACHE_TTL_SECS: u64 = 300; // 5 minutes
 
 pub fn allanime_api() -> String { format!("https://api.{}", ALLANIME_BASE) }
@@ -33,11 +31,10 @@ fn derive_key() -> Vec<u8> {
     h.finalize().to_vec()
 }
 
-pub fn build_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap()
+/// Shared client for API calls. Requests that need another timeout set it per request.
+pub fn http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap())
 }
 
 pub fn default_headers() -> HeaderMap {
@@ -106,19 +103,6 @@ fn disk_cache_set<T: Serialize>(cache: &AppCache, prefix: &str, key: &str, data:
     }
 }
 
-/// Stores show id -> MAL id pairs in one locked write.
-fn mal_map_save(pairs: Vec<(String, u64)>) {
-    let pairs: Vec<_> = pairs.into_iter().filter(|(_, m)| *m != 0).collect();
-    if pairs.is_empty() { return; }
-    store::update::<HashMap<String, u64>, _>(MAL_MAP_FILE, |map| map.extend(pairs));
-}
-
-#[tauri::command]
-pub async fn get_mal_id(show_id: String) -> Result<u64, String> {
-    let map: HashMap<String, u64> = store::load(MAL_MAP_FILE);
-    map.get(&show_id).copied().ok_or_else(|| "Not found".to_string())
-}
-
 // --- Types ---
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AnimeResult { pub id: String, pub name: String, pub episodes: u32, pub thumbnail: String, pub rating: f64, #[serde(default)] pub mal_id: u64 }
@@ -181,6 +165,16 @@ pub fn parse_sources(api_resp: &str) -> Vec<(String, String)> {
         return Regex::new(r#""tobeparsed":"([^"]*)""#).unwrap().captures(api_resp)
             .map(|cap| decrypt_tobeparsed(&cap[1])).unwrap_or_default();
     }
+    // Structured response first; the regexes below remain for responses without the expected shape.
+    let json = serde_json::from_str::<serde_json::Value>(api_resp).ok();
+    if let Some(list) = json.as_ref().and_then(|j| j.pointer("/data/episode/sourceUrls")).and_then(|v| v.as_array()) {
+        let pairs: Vec<(String, String)> = list.iter().filter_map(|s| {
+            let name = s.get("sourceName")?.as_str()?.to_string();
+            let id = s.get("sourceUrl")?.as_str()?.trim_start_matches("--").to_string();
+            Some((name, id))
+        }).collect();
+        if !pairs.is_empty() { return pairs; }
+    }
     let mut s: Vec<(String, String)> = Regex::new(r#""sourceUrl":"--([^"]*)".*?"sourceName":"([^"]*)""#).unwrap()
         .captures_iter(api_resp).map(|c| (c[2].to_string(), c[1].to_string())).collect();
     if s.is_empty() {
@@ -191,58 +185,70 @@ pub fn parse_sources(api_resp: &str) -> Vec<(String, String)> {
     s
 }
 
+/// Walks every JSON object in the tree, depth first.
+fn for_each_object<'a>(v: &'a serde_json::Value, f: &mut impl FnMut(&'a serde_json::Map<String, serde_json::Value>)) {
+    match v {
+        serde_json::Value::Object(m) => {
+            f(m);
+            for child in m.values() { for_each_object(child, f); }
+        }
+        serde_json::Value::Array(items) => for item in items { for_each_object(item, f); },
+        _ => {}
+    }
+}
+
+/// Video links from a provider response. Structured fields first, then any URL field, then a raw m3u8 scan.
+fn parse_provider_links(body: &str) -> Vec<EpisodeLink> {
+    let mut links = Vec::new();
+    let json = serde_json::from_str::<serde_json::Value>(body).ok();
+    if let Some(json) = &json {
+        for_each_object(json, &mut |m| {
+            let text = |k: &str| m.get(k).and_then(|v| v.as_str());
+            if let (Some(url), Some(quality)) = (text("link"), text("resolutionStr")) {
+                links.push(EpisodeLink { quality: quality.to_string(), url: url.to_string(), referrer: None });
+            }
+            // HLS entries flagged with hardsub_lang en-US
+            if m.get("hls").and_then(|v| v.as_bool()) == Some(true) && text("hardsub_lang") == Some("en-US") {
+                if let Some(url) = text("url") {
+                    links.push(EpisodeLink { quality: "hls".to_string(), url: url.to_string(), referrer: None });
+                }
+            }
+        });
+    }
+    if links.is_empty() {
+        if let Some(json) = &json {
+            for_each_object(json, &mut |m| {
+                for key in ["url", "file"] {
+                    if let Some(url) = m.get(key).and_then(|v| v.as_str()).filter(|u| u.starts_with("http")) {
+                        links.push(EpisodeLink { quality: "default".to_string(), url: url.to_string(), referrer: None });
+                    }
+                }
+            });
+        }
+    }
+    if links.is_empty() {
+        // Not JSON, or an unrecognised shape: take any m3u8 URL in the body.
+        for cap in Regex::new(r#"(https?://[^"]*.m3u8[^"]*)"#).unwrap().captures_iter(body) {
+            links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string(), referrer: None });
+        }
+    }
+    links
+}
+
 pub async fn fetch_links(provider_id: String) -> Vec<EpisodeLink> {
     // If the provider_id is already a full URL (e.g. tools.fast4speed.rsvp), it IS the video link
     if provider_id.starts_with("http") {
         return vec![EpisodeLink { quality: "default".to_string(), url: provider_id, referrer: None }];
     }
 
-    let client = build_client();
+    let client = http();
     let url = format!("https://{}{}", ALLANIME_BASE, provider_id);
     let body = match client.get(&url).headers(default_headers()).send().await {
         Ok(r) => match r.text().await { Ok(t) => t, Err(_) => return vec![] },
         Err(_) => return vec![],
     };
 
-    let mut links = Vec::new();
-
-    // Format 1: {"link":"...","resolutionStr":"..."}
-    let re = Regex::new(r#""link"\s*:\s*"([^"]*)".*?"resolutionStr"\s*:\s*"([^"]*)""#).unwrap();
-    for cap in re.captures_iter(&body) {
-        links.push(EpisodeLink { quality: cap[2].to_string(), url: cap[1].to_string(), referrer: None });
-    }
-
-    // Format 2: {"resolutionStr":"...","link":"..."}  (reversed order)
-    if links.is_empty() {
-        let re2 = Regex::new(r#""resolutionStr"\s*:\s*"([^"]*)".*?"link"\s*:\s*"([^"]*)""#).unwrap();
-        for cap in re2.captures_iter(&body) {
-            links.push(EpisodeLink { quality: cap[1].to_string(), url: cap[2].to_string(), referrer: None });
-        }
-    }
-
-    // Format 3: HLS with hardsub
-    let re_hls = Regex::new(r#""hls"\s*,\s*"url"\s*:\s*"([^"]*)".*?"hardsub_lang"\s*:\s*"en-US""#).unwrap();
-    for cap in re_hls.captures_iter(&body) {
-        links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string(), referrer: None });
-    }
-
-    // Format 4: Simple {"url":"..."} or {"file":"..."}
-    if links.is_empty() {
-        let re3 = Regex::new(r#""(?:url|file)"\s*:\s*"(https?://[^"]*)""#).unwrap();
-        for cap in re3.captures_iter(&body) {
-            links.push(EpisodeLink { quality: "default".to_string(), url: cap[1].to_string(), referrer: None });
-        }
-    }
-
-    // Format 5: m3u8 URL anywhere in response
-    if links.is_empty() {
-        let re4 = Regex::new(r#"(https?://[^"]*\.m3u8[^"]*)"#).unwrap();
-        for cap in re4.captures_iter(&body) {
-            links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string(), referrer: None });
-        }
-    }
-
-    links
+    parse_provider_links(&body)
 }
 
 /// Resolves every provider in `sources` to its links, concurrently.
@@ -277,7 +283,7 @@ pub async fn fetch_source_list(show_id: &str, episode: &str, mode: &str) -> Resu
     headers.insert("Origin", HeaderValue::from_static("https://youtu-chan.com"));
     headers.insert(REFERER, HeaderValue::from_static("https://youtu-chan.com"));
 
-    let client = build_client();
+    let client = http();
     let get_resp = client.get(&get_url).headers(headers).send().await.map_err(|e| e.to_string())?
         .text().await.map_err(|e| e.to_string())?;
     if !get_resp.is_empty() && get_resp.contains("tobeparsed") {
@@ -315,14 +321,13 @@ pub async fn search_anime(query: String, mode: String, country: Option<String>, 
         "query": search_gql
     });
 
-    let client = build_client();
+    let client = http();
     let resp = client.post(format!("{}/api", allanime_api()))
         .headers(default_headers()).header("Content-Type", "application/json")
         .json(&body).send().await.map_err(|e| e.to_string())?
         .text().await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
-    let mut mal_pairs = Vec::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
         if let Some(edges) = json.pointer("/data/shows/edges").and_then(|v| v.as_array()) {
             for edge in edges {
@@ -334,13 +339,11 @@ pub async fn search_anime(query: String, mode: String, country: Option<String>, 
                 let rating = edge.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let mal_id = edge.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                 if episodes > 0 {
-                    mal_pairs.push((id.clone(), mal_id));
                     results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id });
                 }
             }
         }
     }
-    mal_map_save(mal_pairs);
     disk_cache_set(&cache, "search", &cache_key, &results);
     Ok(results)
 }
@@ -355,19 +358,18 @@ pub async fn get_episodes(show_id: String, mode: String, cache: State<'_, AppCac
     let gql = r#"query ($showId: String!) { show( _id: $showId ) { _id availableEpisodesDetail }}"#;
     let body = json!({"variables": {"showId": show_id}, "query": gql});
 
-    let client = build_client();
-    let resp = client.post(format!("{}/api", allanime_api()))
+    let client = http();
+    let json: serde_json::Value = client.post(format!("{}/api", allanime_api()))
         .headers(default_headers()).header("Content-Type", "application/json")
         .json(&body).send().await.map_err(|e| e.to_string())?
-        .text().await.map_err(|e| e.to_string())?;
+        .json().await.map_err(|e| e.to_string())?;
 
-    let pattern = format!(r#""{}":\[([^\]]*)\]"#, mode);
-    let re = Regex::new(&pattern).unwrap();
-    let eps = if let Some(cap) = re.captures(&resp) {
-        let mut eps: Vec<String> = cap[1].split(',').map(|s| s.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty()).collect();
-        eps.sort_by(|a, b| a.parse::<f64>().unwrap_or(0.0).partial_cmp(&b.parse::<f64>().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
-        eps
-    } else { vec![] };
+    let mut eps: Vec<String> = json.pointer(&format!("/data/show/availableEpisodesDetail/{}", mode))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().map(|e| match e { serde_json::Value::String(s) => s.clone(), other => other.to_string() })
+            .filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default();
+    eps.sort_by(|a, b| a.parse::<f64>().unwrap_or(0.0).partial_cmp(&b.parse::<f64>().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
 
     disk_cache_set(&cache, "episodes", &cache_key, &eps);
     Ok(eps)
@@ -456,7 +458,7 @@ pub async fn get_anime_details(show_id: String) -> Result<AnimeDetails, String> 
     let gql = r#"query ($showId: String!) { show( _id: $showId ) { _id name thumbnail description genres status score availableEpisodes }}"#;
     let body = json!({"variables": {"showId": show_id}, "query": gql});
 
-    let client = build_client();
+    let client = http();
     let json: serde_json::Value = client.post(format!("{}/api", allanime_api()))
         .headers(default_headers()).header("Content-Type", "application/json")
         .json(&body).send().await.map_err(|e| e.to_string())?
@@ -490,14 +492,13 @@ pub async fn get_popular(mode: String, page: Option<u32>, cache: State<'_, AppCa
     let gql = r#"query( $type: VaildShowObjectEnumType $page: Int $limit: Int $translationType: VaildTranslationTypeEnumType ) { queryPopular( type: $type page: $page limit: $limit translationType: $translationType ) { recommendations { anyCard { _id name thumbnail score malId availableEpisodes } } }}"#;
     let body = json!({"variables": {"type": "anime", "page": pg, "limit": 40, "translationType": mode}, "query": gql});
 
-    let client = build_client();
+    let client = http();
     let resp = client.post(format!("{}/api", allanime_api()))
         .headers(default_headers()).header("Content-Type", "application/json")
         .json(&body).send().await.map_err(|e| e.to_string())?
         .text().await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
-    let mut mal_pairs = Vec::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
         if let Some(recs) = json.pointer("/data/queryPopular/recommendations").and_then(|v| v.as_array()) {
             for rec in recs {
@@ -509,14 +510,12 @@ pub async fn get_popular(mode: String, page: Option<u32>, cache: State<'_, AppCa
                     let mal_id = card.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                     let episodes = card.pointer(&format!("/availableEpisodes/{}", mode)).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     if !id.is_empty() {
-                        mal_pairs.push((id.clone(), mal_id));
                         results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id });
                     }
                 }
             }
         }
     }
-    mal_map_save(mal_pairs);
     disk_cache_set(&cache, "search", &cache_key, &results);
     Ok(results)
 }
@@ -531,14 +530,13 @@ pub async fn get_recently_updated(mode: String, page: Option<u32>, cache: State<
     let gql = r#"query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name thumbnail score malId availableEpisodes __typename } }}"#;
     let body = json!({"variables": {"search": {"allowAdult": false, "allowUnknown": false, "query": ""}, "limit": 40, "page": pg, "translationType": mode, "countryOrigin": "ALL"}, "query": gql});
 
-    let client = build_client();
+    let client = http();
     let resp = client.post(format!("{}/api", allanime_api()))
         .headers(default_headers()).header("Content-Type", "application/json")
         .json(&body).send().await.map_err(|e| e.to_string())?
         .text().await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
-    let mut mal_pairs = Vec::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
         if let Some(edges) = json.pointer("/data/shows/edges").and_then(|v| v.as_array()) {
             for edge in edges {
@@ -549,13 +547,11 @@ pub async fn get_recently_updated(mode: String, page: Option<u32>, cache: State<
                 let mal_id = edge.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                 let episodes = edge.pointer(&format!("/availableEpisodes/{}", mode)).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 if episodes > 0 {
-                    mal_pairs.push((id.clone(), mal_id));
                     results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id });
                 }
             }
         }
     }
-    mal_map_save(mal_pairs);
     disk_cache_set(&cache, "search", &cache_key, &results);
     Ok(results)
 }
@@ -628,6 +624,30 @@ pub async fn get_thumbnail_fallback(name: String, mal_id: Option<u64>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_structured_provider_links() {
+        let body = r#"{"links":[{"resolutionStr":"1080p","link":"https://cdn.example/a.mp4"}],"hls":true,"url":"https://cdn.example/b.m3u8","hardsub_lang":"en-US"}"#;
+        let links = parse_provider_links(body);
+        assert_eq!(links.len(), 2);
+        let by_quality = |q: &str| links.iter().find(|l| l.quality == q).map(|l| l.url.clone());
+        assert_eq!(by_quality("1080p").as_deref(), Some("https://cdn.example/a.mp4"));
+        assert_eq!(by_quality("hls").as_deref(), Some("https://cdn.example/b.m3u8"));
+    }
+
+    #[test]
+    fn falls_back_to_url_fields_then_m3u8_scan() {
+        let json = parse_provider_links(r#"{"file":"https://cdn.example/c.mp4"}"#);
+        assert_eq!((json[0].quality.as_str(), json[0].url.as_str()), ("default", "https://cdn.example/c.mp4"));
+        let raw = parse_provider_links(r#"not json "https://cdn.example/d.m3u8" end"#);
+        assert_eq!((raw[0].quality.as_str(), raw[0].url.as_str()), ("hls", "https://cdn.example/d.m3u8"));
+    }
+
+    #[test]
+    fn parses_structured_sources() {
+        let body = r#"{"data":{"episode":{"sourceUrls":[{"sourceUrl":"--79","sourceName":"Default"}]}}}"#;
+        assert_eq!(parse_sources(body), vec![("Default".to_string(), "79".to_string())]);
+    }
 
     #[test]
     fn decodes_provider_ids() {

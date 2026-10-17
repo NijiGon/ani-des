@@ -18,8 +18,7 @@ pub async fn get_skip_times(mal_id: u64, episode: u32, ep_length: Option<f64>) -
         if length > 0 { format!("&episodeLength={}", length) } else { String::new() }
     );
 
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build().unwrap();
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?
+    let resp = crate::api::http().get(&url).timeout(std::time::Duration::from_secs(5)).send().await.map_err(|e| e.to_string())?
         .json::<serde_json::Value>().await.map_err(|e| e.to_string())?;
 
     let mut times = Vec::new();
