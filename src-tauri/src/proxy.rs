@@ -80,6 +80,7 @@ async fn handle(mut stream: TcpStream, state: Arc<ProxyState>) -> std::io::Resul
     match path.as_str() {
         "/video" => serve_remote(&mut stream, &state, &params, range_start).await,
         "/local" => serve_local(&mut stream, &params, range_start).await,
+        "/hls.m3u8" => serve_hls(&mut stream, &state, &params).await,
         _ => respond(&mut stream, "404 Not Found", &[("Content-Length", "0".into())]).await,
     }
 }
@@ -115,6 +116,28 @@ async fn serve_local(stream: &mut TcpStream, params: &HashMap<String, String>, r
         if n == 0 || stream.write_all(&buf[..n]).await.is_err() { break; }
     }
     Ok(())
+}
+
+/// Serves a downloaded playlist with each segment name replaced by its local URL.
+async fn serve_hls(stream: &mut TcpStream, state: &ProxyState, params: &HashMap<String, String>) -> std::io::Result<()> {
+    let Some(p) = params.get("p") else {
+        return respond(stream, "400 Bad Request", &[("Content-Length", "0".into())]).await;
+    };
+    let Ok(path) = crate::downloads::resolve_download_file(p) else {
+        return respond(stream, "403 Forbidden", &[("Content-Length", "0".into())]).await;
+    };
+    let text = tokio::fs::read_to_string(&path).await?;
+    let dir = path.parent().unwrap_or(&path).to_path_buf();
+    let body: Vec<String> = text.lines().map(|line| {
+        if line.is_empty() || line.starts_with('#') {
+            line.to_string()
+        } else {
+            format!("http://127.0.0.1:{}/local?k={}&p={}", PROXY_PORT, state.token, urlencoding::encode(&dir.join(line).to_string_lossy()))
+        }
+    }).collect();
+    let body = body.join("\n");
+    respond(stream, "200 OK", &[("Content-Type", "application/vnd.apple.mpegurl".into()), ("Content-Length", body.len().to_string())]).await?;
+    stream.write_all(body.as_bytes()).await
 }
 
 async fn serve_remote(stream: &mut TcpStream, state: &ProxyState, params: &HashMap<String, String>, range_start: Option<u64>) -> std::io::Result<()> {
@@ -165,6 +188,14 @@ pub fn proxy_url(url: String, referrer: Option<String>, state: State<'_, Arc<Pro
 #[tauri::command]
 pub fn local_url(path: String, state: State<'_, Arc<ProxyState>>) -> Result<String, String> {
     let file = crate::downloads::resolve_download_file(&path)?;
+    if file.extension().and_then(|e| e.to_str()) == Some("ts") {
+        // Transport streams play through the playlist saved beside them.
+        let playlist = crate::downloads::resolve_download_file(&file.with_extension("m3u8").to_string_lossy())?;
+        return Ok(format!(
+            "http://127.0.0.1:{}/hls.m3u8?k={}&p={}",
+            PROXY_PORT, state.token, urlencoding::encode(&playlist.to_string_lossy())
+        ));
+    }
     Ok(format!(
         "http://127.0.0.1:{}/local?k={}&p={}",
         PROXY_PORT, state.token, urlencoding::encode(&file.to_string_lossy())
