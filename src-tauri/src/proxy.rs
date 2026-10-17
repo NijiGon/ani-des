@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::io::SeekFrom;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
@@ -118,6 +119,17 @@ async fn serve_local(stream: &mut TcpStream, params: &HashMap<String, String>, r
     Ok(())
 }
 
+/// Replaces each segment line with a local URL; tags and blank lines pass through.
+fn rewrite_playlist(text: &str, dir: &Path, token: &str) -> String {
+    text.lines().map(|line| {
+        if line.is_empty() || line.starts_with('#') {
+            line.to_string()
+        } else {
+            format!("http://127.0.0.1:{}/local?k={}&p={}", PROXY_PORT, token, urlencoding::encode(&dir.join(line).to_string_lossy()))
+        }
+    }).collect::<Vec<_>>().join("\n")
+}
+
 /// Serves a downloaded playlist with each segment name replaced by its local URL.
 async fn serve_hls(stream: &mut TcpStream, state: &ProxyState, params: &HashMap<String, String>) -> std::io::Result<()> {
     let Some(p) = params.get("p") else {
@@ -127,15 +139,8 @@ async fn serve_hls(stream: &mut TcpStream, state: &ProxyState, params: &HashMap<
         return respond(stream, "403 Forbidden", &[("Content-Length", "0".into())]).await;
     };
     let text = tokio::fs::read_to_string(&path).await?;
-    let dir = path.parent().unwrap_or(&path).to_path_buf();
-    let body: Vec<String> = text.lines().map(|line| {
-        if line.is_empty() || line.starts_with('#') {
-            line.to_string()
-        } else {
-            format!("http://127.0.0.1:{}/local?k={}&p={}", PROXY_PORT, state.token, urlencoding::encode(&dir.join(line).to_string_lossy()))
-        }
-    }).collect();
-    let body = body.join("\n");
+    let dir = path.parent().unwrap_or(&path);
+    let body = rewrite_playlist(&text, dir, &state.token);
     respond(stream, "200 OK", &[("Content-Type", "application/vnd.apple.mpegurl".into()), ("Content-Length", body.len().to_string())]).await?;
     stream.write_all(body.as_bytes()).await
 }
@@ -204,7 +209,22 @@ pub fn local_url(path: String, state: State<'_, Arc<ProxyState>>) -> Result<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::parse_target;
+    use super::{parse_target, rewrite_playlist};
+    use std::path::Path;
+
+    #[test]
+    fn rewrites_segment_lines_to_local_urls() {
+        let text = "#EXTM3U\n#EXTINF:4.000,\nEpisode_1.ts\n#EXT-X-ENDLIST\n";
+        let out = rewrite_playlist(text, Path::new("/dl/show"), "tok");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "#EXTM3U");
+        assert_eq!(lines[1], "#EXTINF:4.000,");
+        assert!(lines[2].starts_with("http://127.0.0.1:18293/local?k=tok&p="), "{}", lines[2]);
+        let expected = urlencoding::encode(&Path::new("/dl/show").join("Episode_1.ts").to_string_lossy()).into_owned();
+        assert!(lines[2].ends_with(&expected), "{}", lines[2]);
+        assert_eq!(lines[3], "#EXT-X-ENDLIST");
+    }
 
     #[test]
     fn parses_path_and_decoded_params() {
