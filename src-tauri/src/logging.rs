@@ -41,6 +41,18 @@ fn timestamp() -> String {
     format!("{:02}:{:02}:{:02}", (now % 86400) / 3600, (now % 3600) / 60, now % 60)
 }
 
+/// Deletes daily log files not modified within `keep_days`.
+pub fn prune_old_logs(keep_days: u64) {
+    let max_age = std::time::Duration::from_secs(keep_days * 86400);
+    let Ok(entries) = fs::read_dir(log_dir()) else { return };
+    for e in entries.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok()
+            .and_then(|t| t.elapsed().ok())
+            .map_or(false, |age| age > max_age);
+        if old { fs::remove_file(e.path()).ok(); }
+    }
+}
+
 pub fn log(msg: &str) {
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(log_path()) {
         writeln!(f, "[{}] {}", timestamp(), msg).ok();

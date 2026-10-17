@@ -41,6 +41,7 @@ fn main() {
         .manage(DownloadManager::new())
         .manage(proxy_state)
         .setup(move |_app| {
+            logging::prune_old_logs(14);
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = proxy::start_proxy(proxy_for_task).await {
                     logging::log(&format!("Media proxy failed to start: {}", e));

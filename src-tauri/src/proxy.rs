@@ -183,4 +183,81 @@ mod tests {
         assert_eq!(params.get("u").map(String::as_str), Some("https://x.com/a b.mp4"));
         assert_eq!(params.get("r").map(String::as_str), Some(""));
     }
+
+    mod handler {
+        use super::super::{handle, ProxyState};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        /// Fake upstream that answers every connection with a fixed body.
+        async fn spawn_upstream() -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut s, _)) = listener.accept().await else { continue };
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 4096];
+                        s.read(&mut buf).await.ok();
+                        let body = b"hello-video";
+                        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                        s.write_all(head.as_bytes()).await.ok();
+                        s.write_all(body).await.ok();
+                    });
+                }
+            });
+            format!("http://{}/clip.mp4", addr)
+        }
+
+        /// Sends one GET through a real proxy connection and returns the raw response.
+        async fn get(state: Arc<ProxyState>, target: &str) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (s, _) = listener.accept().await.unwrap();
+                handle(s, state).await.ok();
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            client.write_all(format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", target).as_bytes()).await.unwrap();
+            let mut out = String::new();
+            client.read_to_string(&mut out).await.unwrap();
+            out
+        }
+
+        #[tokio::test]
+        async fn rejects_missing_token() {
+            let state = Arc::new(ProxyState::new());
+            let upstream = spawn_upstream().await;
+            let resp = get(state, &format!("/video?k=wrong&u={}", urlencoding::encode(&upstream))).await;
+            assert!(resp.starts_with("HTTP/1.1 403"), "{}", resp);
+        }
+
+        #[tokio::test]
+        async fn relays_remote_stream_with_token_and_no_cors_header() {
+            let state = Arc::new(ProxyState::new());
+            let upstream = spawn_upstream().await;
+            let target = format!("/video?k={}&u={}", state.token, urlencoding::encode(&upstream));
+            let resp = get(state, &target).await;
+            assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
+            assert!(resp.ends_with("hello-video"), "{}", resp);
+            assert!(!resp.to_ascii_lowercase().contains("access-control-allow-origin"), "{}", resp);
+        }
+
+        #[tokio::test]
+        async fn refuses_local_files_outside_download_folder() {
+            let state = Arc::new(ProxyState::new());
+            let outside = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+            let target = format!("/local?k={}&p={}", state.token, urlencoding::encode(&outside));
+            let resp = get(state, &target).await;
+            assert!(resp.starts_with("HTTP/1.1 403"), "{}", resp);
+        }
+
+        #[tokio::test]
+        async fn unknown_path_is_404() {
+            let state = Arc::new(ProxyState::new());
+            let resp = get(state.clone(), &format!("/nope?k={}", state.token)).await;
+            assert!(resp.starts_with("HTTP/1.1 404"), "{}", resp);
+        }
+    }
 }

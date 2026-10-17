@@ -124,7 +124,7 @@ pub async fn get_mal_id(show_id: String) -> Result<u64, String> {
 pub struct AnimeResult { pub id: String, pub name: String, pub episodes: u32, pub thumbnail: String, pub rating: f64, #[serde(default)] pub mal_id: u64 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct EpisodeLink { pub quality: String, pub url: String }
+pub struct EpisodeLink { pub quality: String, pub url: String, #[serde(default)] pub referrer: Option<String> }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CacheStats { pub search_entries: usize, pub episode_entries: usize, pub link_entries: usize }
@@ -194,7 +194,7 @@ pub fn parse_sources(api_resp: &str) -> Vec<(String, String)> {
 pub async fn fetch_links(provider_id: String) -> Vec<EpisodeLink> {
     // If the provider_id is already a full URL (e.g. tools.fast4speed.rsvp), it IS the video link
     if provider_id.starts_with("http") {
-        return vec![EpisodeLink { quality: "default".to_string(), url: provider_id }];
+        return vec![EpisodeLink { quality: "default".to_string(), url: provider_id, referrer: None }];
     }
 
     let client = build_client();
@@ -209,28 +209,28 @@ pub async fn fetch_links(provider_id: String) -> Vec<EpisodeLink> {
     // Format 1: {"link":"...","resolutionStr":"..."}
     let re = Regex::new(r#""link"\s*:\s*"([^"]*)".*?"resolutionStr"\s*:\s*"([^"]*)""#).unwrap();
     for cap in re.captures_iter(&body) {
-        links.push(EpisodeLink { quality: cap[2].to_string(), url: cap[1].to_string() });
+        links.push(EpisodeLink { quality: cap[2].to_string(), url: cap[1].to_string(), referrer: None });
     }
 
     // Format 2: {"resolutionStr":"...","link":"..."}  (reversed order)
     if links.is_empty() {
         let re2 = Regex::new(r#""resolutionStr"\s*:\s*"([^"]*)".*?"link"\s*:\s*"([^"]*)""#).unwrap();
         for cap in re2.captures_iter(&body) {
-            links.push(EpisodeLink { quality: cap[1].to_string(), url: cap[2].to_string() });
+            links.push(EpisodeLink { quality: cap[1].to_string(), url: cap[2].to_string(), referrer: None });
         }
     }
 
     // Format 3: HLS with hardsub
     let re_hls = Regex::new(r#""hls"\s*,\s*"url"\s*:\s*"([^"]*)".*?"hardsub_lang"\s*:\s*"en-US""#).unwrap();
     for cap in re_hls.captures_iter(&body) {
-        links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string() });
+        links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string(), referrer: None });
     }
 
     // Format 4: Simple {"url":"..."} or {"file":"..."}
     if links.is_empty() {
         let re3 = Regex::new(r#""(?:url|file)"\s*:\s*"(https?://[^"]*)""#).unwrap();
         for cap in re3.captures_iter(&body) {
-            links.push(EpisodeLink { quality: "default".to_string(), url: cap[1].to_string() });
+            links.push(EpisodeLink { quality: "default".to_string(), url: cap[1].to_string(), referrer: None });
         }
     }
 
@@ -238,7 +238,7 @@ pub async fn fetch_links(provider_id: String) -> Vec<EpisodeLink> {
     if links.is_empty() {
         let re4 = Regex::new(r#"(https?://[^"]*\.m3u8[^"]*)"#).unwrap();
         for cap in re4.captures_iter(&body) {
-            links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string() });
+            links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string(), referrer: None });
         }
     }
 
@@ -406,7 +406,7 @@ pub async fn get_episode_url(show_id: String, episode: String, mode: String, qua
         let search_title = title.unwrap_or_else(|| show_id.clone());
         let gogo_sources = crate::consumet::get_fallback_sources(&search_title, &episode).await;
         let fallback: Vec<EpisodeLink> = gogo_sources.into_iter()
-            .map(|s| EpisodeLink { quality: format!("gogo-{}", s.quality), url: s.url })
+            .map(|s| EpisodeLink { quality: format!("gogo-{}", s.quality), url: s.url, referrer: Some(s.referrer) })
             .collect();
         if !fallback.is_empty() {
             disk_cache_set(&cache, "links", &cache_key, &fallback);

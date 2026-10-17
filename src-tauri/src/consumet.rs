@@ -7,6 +7,8 @@ const GOGO_BASE: &str = "https://anitaku.pe";
 pub struct FallbackSource {
     pub quality: String,
     pub url: String,
+    /// Origin of the embed host; the video server checks this as the referrer.
+    pub referrer: String,
 }
 
 fn client() -> reqwest::Client {
@@ -55,6 +57,7 @@ pub async fn get_fallback_sources(title: &str, episode: &str) -> Vec<FallbackSou
     };
 
     let mut sources = Vec::new();
+    let embed_origin = embed_url.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
 
     // Try to find m3u8 or mp4 links
     let source_re = Regex::new(r#"(?:file|src|source)[\s:'"=]+['"]?(https?://[^'"&\s]+\.(?:m3u8|mp4)[^'"&\s]*)"#).unwrap();
@@ -62,6 +65,7 @@ pub async fn get_fallback_sources(title: &str, episode: &str) -> Vec<FallbackSou
         sources.push(FallbackSource {
             quality: if cap[1].contains("m3u8") { "hls".to_string() } else { "mp4".to_string() },
             url: cap[1].to_string(),
+            referrer: embed_origin.clone(),
         });
     }
 

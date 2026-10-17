@@ -420,7 +420,7 @@ async function playSrc(i){
   document.querySelectorAll('.qbtn').forEach((b,idx)=>{b.classList.toggle('bp',idx===i);b.classList.toggle('bg',idx!==i);});
   if(window._hls){window._hls.destroy();window._hls=null;}
   let url=S.links[i].url;
-  if(!url.includes('.m3u8')&&!url.startsWith('http://127.0.0.1')){try{url=await invoke('proxy_url',{url,referrer:'https://allmanga.to'});}catch(e){}}
+  if(!url.includes('.m3u8')&&!url.startsWith('http://127.0.0.1')){try{url=await invoke('proxy_url',{url,referrer:S.links[i].referrer||'https://allmanga.to'});}catch(e){}}
   if(url.includes('.m3u8')){
     if(Hls.isSupported()){const hls=new Hls();hls.loadSource(url);hls.attachMedia(v);hls.on(Hls.Events.MANIFEST_PARSED,()=>{seekR(v);v.play();});hls.on(Hls.Events.ERROR,(_,d)=>{if(d.fatal)document.getElementById('status').textContent='Playback error';});window._hls=hls;}
     else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=url;v.onloadedmetadata=()=>seekR(v);}

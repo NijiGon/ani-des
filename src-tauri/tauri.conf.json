@@ -16,7 +16,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src * data: blob:; media-src * blob:; connect-src 'self' ipc: http://ipc.localhost http: https: http://127.0.0.1:18293; object-src 'none'; base-uri 'none'; frame-src 'none'"
     }
   },
   "plugins": {
