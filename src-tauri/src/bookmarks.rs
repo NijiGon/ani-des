@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
+
+use crate::store;
+
+const BOOKMARKS_FILE: &str = "bookmarks.json";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Bookmark {
@@ -12,42 +14,20 @@ pub struct Bookmark {
     pub sort: String,
 }
 
-fn bookmarks_path() -> PathBuf {
-    let dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("ani-des");
-    fs::create_dir_all(&dir).ok();
-    dir.join("bookmarks.json")
-}
-
-fn load_all() -> Vec<Bookmark> {
-    fs::read_to_string(bookmarks_path()).ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_all(entries: &[Bookmark]) {
-    if let Ok(json) = serde_json::to_string_pretty(entries) {
-        fs::write(bookmarks_path(), json).ok();
-    }
-}
-
 #[tauri::command]
 pub async fn save_bookmark(name: String, query: String, mode: String, country: String, sort: String) -> Result<(), String> {
-    let mut entries = load_all();
     let id = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
-    entries.push(Bookmark { id, name, query, mode, country, sort });
-    save_all(&entries);
+    store::update::<Vec<Bookmark>, _>(BOOKMARKS_FILE, |entries| entries.push(Bookmark { id, name, query, mode, country, sort }));
     Ok(())
 }
 
 #[tauri::command]
 pub async fn get_bookmarks() -> Result<Vec<Bookmark>, String> {
-    Ok(load_all())
+    Ok(store::load(BOOKMARKS_FILE))
 }
 
 #[tauri::command]
 pub async fn delete_bookmark(id: String) -> Result<(), String> {
-    let mut entries = load_all();
-    entries.retain(|b| b.id != id);
-    save_all(&entries);
+    store::update::<Vec<Bookmark>, _>(BOOKMARKS_FILE, |entries| entries.retain(|b| b.id != id));
     Ok(())
 }

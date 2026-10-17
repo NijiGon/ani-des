@@ -3,11 +3,16 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::fs;
+use std::path::PathBuf;
+use std::time::Duration;
 use tauri::State;
+
+use crate::jikan::{jikan_get, JIKAN_BASE};
+use crate::store;
 
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
@@ -15,6 +20,9 @@ const AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/2
 const ALLANIME_REFR: &str = "https://allmanga.to";
 const ALLANIME_BASE: &str = "allanime.day";
 const ALLANIME_KEY_INPUT: &str = "Xot36i3lK3:v1";
+const EPISODE_QUERY_HASH: &str = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
+const EPISODE_GQL: &str = r#"query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { episode( showId: $showId translationType: $translationType episodeString: $episodeString ) { episodeString sourceUrls }}"#;
+const MAL_MAP_FILE: &str = "mal_mappings.json";
 const CACHE_TTL_SECS: u64 = 300; // 5 minutes
 
 pub fn allanime_api() -> String { format!("https://api.{}", ALLANIME_BASE) }
@@ -27,7 +35,6 @@ fn derive_key() -> Vec<u8> {
 
 pub fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap()
@@ -40,37 +47,76 @@ pub fn default_headers() -> HeaderMap {
     h
 }
 
-// --- Cache ---
-struct CacheEntry<T> { data: T, created: Instant }
-
-pub struct AppCache {
-    search: Mutex<HashMap<String, CacheEntry<Vec<AnimeResult>>>>,
-    episodes: Mutex<HashMap<String, CacheEntry<Vec<String>>>>,
-    links: Mutex<HashMap<String, CacheEntry<Vec<EpisodeLink>>>>,
+/// Longest prefix of `s` that is at most `n` bytes and ends on a char boundary.
+pub fn snippet(s: &str, n: usize) -> &str {
+    let mut end = n.min(s.len());
+    while !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
 }
+
+fn mode_str(mode: &str) -> &'static str {
+    if mode == "dub" { "dub" } else { "sub" }
+}
+
+// --- Cache (disk-based) ---
+pub struct AppCache { dir: PathBuf }
 
 impl AppCache {
     pub fn new() -> Self {
-        Self {
-            search: Mutex::new(HashMap::new()),
-            episodes: Mutex::new(HashMap::new()),
-            links: Mutex::new(HashMap::new()),
-        }
+        let dir = store::data_dir().join("cache");
+        fs::create_dir_all(&dir).ok();
+        Self { dir }
     }
 }
 
-fn cache_valid<T>(cache: &Mutex<HashMap<String, CacheEntry<T>>>, key: &str) -> Option<T> where T: Clone {
-    let map = cache.lock().ok()?;
-    let entry = map.get(key)?;
-    if entry.created.elapsed() < Duration::from_secs(CACHE_TTL_SECS) {
-        Some(entry.data.clone())
-    } else { None }
+fn cache_path(cache: &AppCache, prefix: &str, key: &str) -> PathBuf {
+    let mut h = Sha256::new(); h.update(key.as_bytes());
+    let hash = format!("{:x}", h.finalize());
+    cache.dir.join(format!("{}_{}.json", prefix, &hash[..16]))
 }
 
-fn cache_set<T: Clone>(cache: &Mutex<HashMap<String, CacheEntry<T>>>, key: String, data: T) {
-    if let Ok(mut map) = cache.lock() {
-        map.insert(key, CacheEntry { data, created: Instant::now() });
+fn disk_cache_get<T: serde::de::DeserializeOwned>(cache: &AppCache, prefix: &str, key: &str) -> Option<T> {
+    let path = cache_path(cache, prefix, key);
+    let meta = fs::metadata(&path).ok()?;
+    if meta.modified().ok()?.elapsed().ok()? > Duration::from_secs(CACHE_TTL_SECS) {
+        fs::remove_file(&path).ok();
+        return None;
     }
+    let data = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn prune_expired(cache: &AppCache) {
+    let Ok(entries) = fs::read_dir(&cache.dir) else { return };
+    for e in entries.flatten() {
+        let expired = e.metadata().and_then(|m| m.modified()).ok()
+            .and_then(|t| t.elapsed().ok())
+            .map_or(false, |age| age > Duration::from_secs(CACHE_TTL_SECS));
+        if expired { fs::remove_file(e.path()).ok(); }
+    }
+}
+
+fn disk_cache_set<T: Serialize>(cache: &AppCache, prefix: &str, key: &str, data: &T) {
+    let Ok(value) = serde_json::to_value(data) else { return };
+    // Never cache empty results: a failed lookup would otherwise hide retries for the whole TTL.
+    if value.as_array().map_or(false, |a| a.is_empty()) { return; }
+    prune_expired(cache);
+    if let Ok(json) = serde_json::to_string(&value) {
+        fs::write(cache_path(cache, prefix, key), json).ok();
+    }
+}
+
+/// Stores show id -> MAL id pairs in one locked write.
+fn mal_map_save(pairs: Vec<(String, u64)>) {
+    let pairs: Vec<_> = pairs.into_iter().filter(|(_, m)| *m != 0).collect();
+    if pairs.is_empty() { return; }
+    store::update::<HashMap<String, u64>, _>(MAL_MAP_FILE, |map| map.extend(pairs));
+}
+
+#[tauri::command]
+pub async fn get_mal_id(show_id: String) -> Result<u64, String> {
+    let map: HashMap<String, u64> = store::load(MAL_MAP_FILE);
+    map.get(&show_id).copied().ok_or_else(|| "Not found".to_string())
 }
 
 // --- Types ---
@@ -129,6 +175,22 @@ pub fn decrypt_tobeparsed(blob: &str) -> Vec<(String, String)> {
     re.captures_iter(&plain).map(|c| (c[2].to_string(), c[1].to_string())).collect()
 }
 
+/// Extracts (source name, encoded provider id) pairs from an AllAnime episode response.
+pub fn parse_sources(api_resp: &str) -> Vec<(String, String)> {
+    if api_resp.contains("tobeparsed") {
+        return Regex::new(r#""tobeparsed":"([^"]*)""#).unwrap().captures(api_resp)
+            .map(|cap| decrypt_tobeparsed(&cap[1])).unwrap_or_default();
+    }
+    let mut s: Vec<(String, String)> = Regex::new(r#""sourceUrl":"--([^"]*)".*?"sourceName":"([^"]*)""#).unwrap()
+        .captures_iter(api_resp).map(|c| (c[2].to_string(), c[1].to_string())).collect();
+    if s.is_empty() {
+        // Alternate order: sourceName before sourceUrl
+        s = Regex::new(r#""sourceName":"([^"]*)".*?"sourceUrl":"--([^"]*)""#).unwrap()
+            .captures_iter(api_resp).map(|c| (c[1].to_string(), c[2].to_string())).collect();
+    }
+    s
+}
+
 pub async fn fetch_links(provider_id: String) -> Vec<EpisodeLink> {
     // If the provider_id is already a full URL (e.g. tools.fast4speed.rsvp), it IS the video link
     if provider_id.starts_with("http") {
@@ -164,7 +226,7 @@ pub async fn fetch_links(provider_id: String) -> Vec<EpisodeLink> {
         links.push(EpisodeLink { quality: "hls".to_string(), url: cap[1].to_string() });
     }
 
-    // Format 4: Simple {"url":"..."} or {"file":"..."}  
+    // Format 4: Simple {"url":"..."} or {"file":"..."}
     if links.is_empty() {
         let re3 = Regex::new(r#""(?:url|file)"\s*:\s*"(https?://[^"]*)""#).unwrap();
         for cap in re3.captures_iter(&body) {
@@ -183,18 +245,67 @@ pub async fn fetch_links(provider_id: String) -> Vec<EpisodeLink> {
     links
 }
 
+/// Resolves every provider in `sources` to its links, concurrently.
+pub async fn resolve_sources(sources: &[(String, String)]) -> Vec<EpisodeLink> {
+    let futs: Vec<_> = sources.iter()
+        .map(|(_, eid)| decode_provider_id(eid))
+        .filter(|id| !id.is_empty())
+        .map(|id| fetch_links(id)).collect();
+    futures::future::join_all(futs).await.into_iter().flatten().collect()
+}
+
+/// Raw responses from the AllAnime episode lookup, kept for debugging.
+pub struct SourceFetch {
+    pub get_url: String,
+    pub get_resp: String,
+    pub post_resp: Option<String>,
+    /// The response that was actually parsed (GET, or POST when GET had no sources).
+    pub api_resp: String,
+}
+
+/// GET the persisted-query episode lookup, falling back to POST when GET has no sources.
+pub async fn fetch_source_list(show_id: &str, episode: &str, mode: &str) -> Result<SourceFetch, String> {
+    let vars = json!({"showId": show_id, "translationType": mode, "episodeString": episode});
+    let ext = json!({"persistedQuery": {"version": 1, "sha256Hash": EPISODE_QUERY_HASH}});
+
+    // Match ani-cli's minimal encoding: only encode " : { } ,
+    let encoded_vars = vars.to_string().replace('"', "%22").replace(':', "%3A").replace('{', "%7B").replace('}', "%7D").replace(',', "%2C");
+    let encoded_ext = ext.to_string().replace('"', "%22").replace(':', "%3A").replace('{', "%7B").replace('}', "%7D").replace(',', "%2C").replace(' ', "%20");
+    let get_url = format!("{}/api?variables={}&extensions={}", allanime_api(), encoded_vars, encoded_ext);
+
+    let mut headers = default_headers();
+    headers.insert("Origin", HeaderValue::from_static("https://youtu-chan.com"));
+    headers.insert(REFERER, HeaderValue::from_static("https://youtu-chan.com"));
+
+    let client = build_client();
+    let get_resp = client.get(&get_url).headers(headers).send().await.map_err(|e| e.to_string())?
+        .text().await.map_err(|e| e.to_string())?;
+    if !get_resp.is_empty() && get_resp.contains("tobeparsed") {
+        return Ok(SourceFetch { get_url, api_resp: get_resp.clone(), get_resp, post_resp: None });
+    }
+
+    crate::logging::log("GET had no tobeparsed, trying POST fallback");
+    let body = json!({"variables": {"showId": show_id, "translationType": mode, "episodeString": episode}, "query": EPISODE_GQL});
+    let post_resp = client.post(format!("{}/api", allanime_api()))
+        .headers(default_headers()).header("Content-Type", "application/json")
+        .json(&body).send().await.map_err(|e| e.to_string())?
+        .text().await.map_err(|e| e.to_string())?;
+    crate::logging::log(&format!("POST response: {} bytes - {}", post_resp.len(), snippet(&post_resp, 300)));
+    Ok(SourceFetch { get_url, get_resp, api_resp: post_resp.clone(), post_resp: Some(post_resp) })
+}
+
 // --- Commands ---
 #[tauri::command]
 pub async fn search_anime(query: String, mode: String, country: Option<String>, cache: State<'_, AppCache>) -> Result<Vec<AnimeResult>, String> {
-    let mode = if mode == "dub" { "dub" } else { "sub" };
+    let mode = mode_str(&mode);
     let country = country.unwrap_or_else(|| "ALL".to_string());
     let cache_key = format!("{}:{}:{}", query, mode, country);
 
-    if let Some(cached) = cache_valid(&cache.search, &cache_key) { return Ok(cached); }
+    if let Some(cached) = disk_cache_get::<Vec<AnimeResult>>(&cache, "search", &cache_key) { return Ok(cached); }
 
     let search_gql = r#"query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name thumbnail score malId availableEpisodes __typename } }}"#;
 
-    let body = serde_json::json!({
+    let body = json!({
         "variables": {
             "search": {"allowAdult": false, "allowUnknown": false, "query": query},
             "limit": 40, "page": 1,
@@ -211,6 +322,7 @@ pub async fn search_anime(query: String, mode: String, country: Option<String>, 
         .text().await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
+    let mut mal_pairs = Vec::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
         if let Some(edges) = json.pointer("/data/shows/edges").and_then(|v| v.as_array()) {
             for edge in edges {
@@ -222,24 +334,26 @@ pub async fn search_anime(query: String, mode: String, country: Option<String>, 
                 let rating = edge.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let mal_id = edge.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                 if episodes > 0 {
+                    mal_pairs.push((id.clone(), mal_id));
                     results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id });
                 }
             }
         }
     }
-    cache_set(&cache.search, cache_key, results.clone());
+    mal_map_save(mal_pairs);
+    disk_cache_set(&cache, "search", &cache_key, &results);
     Ok(results)
 }
 
 #[tauri::command]
 pub async fn get_episodes(show_id: String, mode: String, cache: State<'_, AppCache>) -> Result<Vec<String>, String> {
-    let mode = if mode == "dub" { "dub" } else { "sub" };
+    let mode = mode_str(&mode);
     let cache_key = format!("{}:{}", show_id, mode);
 
-    if let Some(cached) = cache_valid(&cache.episodes, &cache_key) { return Ok(cached); }
+    if let Some(cached) = disk_cache_get::<Vec<String>>(&cache, "episodes", &cache_key) { return Ok(cached); }
 
     let gql = r#"query ($showId: String!) { show( _id: $showId ) { _id availableEpisodesDetail }}"#;
-    let body = serde_json::json!({"variables": {"showId": show_id}, "query": gql});
+    let body = json!({"variables": {"showId": show_id}, "query": gql});
 
     let client = build_client();
     let resp = client.post(format!("{}/api", allanime_api()))
@@ -251,87 +365,38 @@ pub async fn get_episodes(show_id: String, mode: String, cache: State<'_, AppCac
     let re = Regex::new(&pattern).unwrap();
     let eps = if let Some(cap) = re.captures(&resp) {
         let mut eps: Vec<String> = cap[1].split(',').map(|s| s.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty()).collect();
-        eps.sort_by(|a, b| a.parse::<f64>().unwrap_or(0.0).partial_cmp(&b.parse::<f64>().unwrap_or(0.0)).unwrap());
+        eps.sort_by(|a, b| a.parse::<f64>().unwrap_or(0.0).partial_cmp(&b.parse::<f64>().unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal));
         eps
     } else { vec![] };
 
-    cache_set(&cache.episodes, cache_key, eps.clone());
+    disk_cache_set(&cache, "episodes", &cache_key, &eps);
     Ok(eps)
 }
 
 #[tauri::command]
 pub async fn get_episode_url(show_id: String, episode: String, mode: String, quality: String, title: Option<String>, cache: State<'_, AppCache>) -> Result<Vec<EpisodeLink>, String> {
-    let mode_str = if mode == "dub" { "dub" } else { "sub" };
-    let cache_key = format!("{}:{}:{}", show_id, episode, mode_str);
+    let mode = mode_str(&mode);
+    let cache_key = format!("{}:{}:{}", show_id, episode, mode);
 
-    if let Some(cached) = cache_valid(&cache.links, &cache_key) { return Ok(cached); }
+    if let Some(cached) = disk_cache_get::<Vec<EpisodeLink>>(&cache, "links", &cache_key) { return Ok(cached); }
 
-    let episode_gql = r#"query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { episode( showId: $showId translationType: $translationType episodeString: $episodeString ) { episodeString sourceUrls }}"#;
-    let query_hash = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
-    let vars = serde_json::json!({"showId": show_id, "translationType": mode_str, "episodeString": episode});
-    let ext = serde_json::json!({"persistedQuery":{"version":1,"sha256Hash": query_hash}});
+    let fetch = fetch_source_list(&show_id, &episode, mode).await?;
+    crate::logging::log(&format!("GET {} -> {} bytes", fetch.get_url, fetch.get_resp.len()));
+    crate::logging::log(&format!("GET response: {}", snippet(&fetch.get_resp, 300)));
 
-    let client = build_client();
-    let vars_str = vars.to_string();
-    let ext_str = ext.to_string();
-    // Match ani-cli's minimal encoding: only encode " : { } ,
-    let encoded_vars = vars_str.replace('"', "%22").replace(':', "%3A").replace('{', "%7B").replace('}', "%7D").replace(',', "%2C");
-    let encoded_ext = ext_str.replace('"', "%22").replace(':', "%3A").replace('{', "%7B").replace('}', "%7D").replace(',', "%2C").replace(' ', "%20");
-    let api_url = format!("{}/api?variables={}&extensions={}", allanime_api(), encoded_vars, encoded_ext);
-
-    let mut headers = default_headers();
-    headers.insert("Origin", HeaderValue::from_static("https://youtu-chan.com"));
-    headers.insert(REFERER, HeaderValue::from_static("https://youtu-chan.com"));
-
-    let resp = client.get(&api_url).headers(headers).send().await.map_err(|e| e.to_string())?
-        .text().await.map_err(|e| e.to_string())?;
-
-    crate::logging::log(&format!("GET {} -> {} bytes", api_url, resp.len()));
-    crate::logging::log(&format!("GET response: {}", &resp[..resp.len().min(300)]));
-
-    let api_resp = if resp.is_empty() || !resp.contains("tobeparsed") {
-        crate::logging::log("GET had no tobeparsed, trying POST fallback");
-        let body = serde_json::json!({"variables": {"showId": show_id, "translationType": mode_str, "episodeString": episode}, "query": episode_gql});
-        let post_resp = client.post(format!("{}/api", allanime_api()))
-            .headers(default_headers()).header("Content-Type", "application/json")
-            .json(&body).send().await.map_err(|e| e.to_string())?
-            .text().await.map_err(|e| e.to_string())?;
-        crate::logging::log(&format!("POST response: {} bytes - {}", post_resp.len(), &post_resp[..post_resp.len().min(300)]));
-        post_resp
-    } else { resp };
-
-    let sources: Vec<(String, String)> = if api_resp.contains("tobeparsed") {
-        Regex::new(r#""tobeparsed":"([^"]*)""#).unwrap().captures(&api_resp)
-            .map(|cap| decrypt_tobeparsed(&cap[1])).unwrap_or_default()
-    } else {
-        // Try multiple regex patterns for different response formats
-        let mut s: Vec<(String, String)> = Regex::new(r#""sourceUrl":"--([^"]*)".*?"sourceName":"([^"]*)""#).unwrap()
-            .captures_iter(&api_resp).map(|c| (c[2].to_string(), c[1].to_string())).collect();
-        if s.is_empty() {
-            // Alternate order: sourceName before sourceUrl
-            s = Regex::new(r#""sourceName":"([^"]*)".*?"sourceUrl":"--([^"]*)""#).unwrap()
-                .captures_iter(&api_resp).map(|c| (c[1].to_string(), c[2].to_string())).collect();
-        }
-        s
-    };
-
-    let futs: Vec<_> = sources.iter()
-        .map(|(_, eid)| decode_provider_id(eid))
-        .filter(|id| !id.is_empty())
-        .map(|id| fetch_links(id)).collect();
-
-    crate::logging::log(&format!("Sources found: {} | has_tobeparsed: {} | providers: {:?}", sources.len(), api_resp.contains("tobeparsed"), sources.iter().map(|(n,_)| n.as_str()).collect::<Vec<_>>()));
+    let sources = parse_sources(&fetch.api_resp);
+    crate::logging::log(&format!("Sources found: {} | has_tobeparsed: {} | providers: {:?}", sources.len(), fetch.api_resp.contains("tobeparsed"), sources.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()));
     for (name, eid) in &sources {
-        crate::logging::log(&format!("  Provider '{}' encoded_id: {}... -> decoded: {}...", name, &eid[..eid.len().min(30)], &decode_provider_id(eid)[..decode_provider_id(eid).len().min(60)]));
+        crate::logging::log(&format!("  Provider '{}' encoded_id: {}... -> decoded: {}", name, snippet(eid, 30), snippet(&decode_provider_id(eid), 60)));
     }
 
-    let all_links: Vec<EpisodeLink> = futures::future::join_all(futs).await.into_iter().flatten().collect();
+    let all_links = resolve_sources(&sources).await;
     crate::logging::log(&format!("Total links fetched: {}", all_links.len()));
 
     if !quality.is_empty() && quality != "best" {
         let filtered: Vec<EpisodeLink> = all_links.iter().filter(|l| l.quality.contains(&quality)).cloned().collect();
         if !filtered.is_empty() {
-            cache_set(&cache.links, cache_key, filtered.clone());
+            disk_cache_set(&cache, "links", &cache_key, &filtered);
             return Ok(filtered);
         }
     }
@@ -344,29 +409,32 @@ pub async fn get_episode_url(show_id: String, episode: String, mode: String, qua
             .map(|s| EpisodeLink { quality: format!("gogo-{}", s.quality), url: s.url })
             .collect();
         if !fallback.is_empty() {
-            cache_set(&cache.links, cache_key, fallback.clone());
+            disk_cache_set(&cache, "links", &cache_key, &fallback);
             return Ok(fallback);
         }
     }
 
-    cache_set(&cache.links, cache_key, all_links.clone());
+    disk_cache_set(&cache, "links", &cache_key, &all_links);
     Ok(all_links)
 }
 
 #[tauri::command]
 pub async fn get_cache_stats(cache: State<'_, AppCache>) -> Result<CacheStats, String> {
-    Ok(CacheStats {
-        search_entries: cache.search.lock().map(|m| m.len()).unwrap_or(0),
-        episode_entries: cache.episodes.lock().map(|m| m.len()).unwrap_or(0),
-        link_entries: cache.links.lock().map(|m| m.len()).unwrap_or(0),
-    })
+    let mut stats = CacheStats { search_entries: 0, episode_entries: 0, link_entries: 0 };
+    for e in fs::read_dir(&cache.dir).map_err(|e| e.to_string())?.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with("search_") { stats.search_entries += 1; }
+        else if name.starts_with("episodes_") { stats.episode_entries += 1; }
+        else if name.starts_with("links_") { stats.link_entries += 1; }
+    }
+    Ok(stats)
 }
 
 #[tauri::command]
 pub async fn clear_cache(cache: State<'_, AppCache>) -> Result<(), String> {
-    cache.search.lock().map(|mut m| m.clear()).ok();
-    cache.episodes.lock().map(|mut m| m.clear()).ok();
-    cache.links.lock().map(|mut m| m.clear()).ok();
+    if let Ok(entries) = fs::read_dir(&cache.dir) {
+        for e in entries.flatten() { fs::remove_file(e.path()).ok(); }
+    }
     Ok(())
 }
 
@@ -386,43 +454,41 @@ pub struct AnimeDetails {
 #[tauri::command]
 pub async fn get_anime_details(show_id: String) -> Result<AnimeDetails, String> {
     let gql = r#"query ($showId: String!) { show( _id: $showId ) { _id name thumbnail description genres status score availableEpisodes }}"#;
-    let body = serde_json::json!({"variables": {"showId": show_id}, "query": gql});
+    let body = json!({"variables": {"showId": show_id}, "query": gql});
 
     let client = build_client();
-    let resp = client.post(format!("{}/api", allanime_api()))
+    let json: serde_json::Value = client.post(format!("{}/api", allanime_api()))
         .headers(default_headers()).header("Content-Type", "application/json")
         .json(&body).send().await.map_err(|e| e.to_string())?
-        .text().await.map_err(|e| e.to_string())?;
+        .json().await.map_err(|e| e.to_string())?;
 
-    let name = Regex::new(r#""name":"([^"]*)"#).unwrap()
-        .captures(&resp).map(|c| c[1].to_string()).unwrap_or_default();
-    let description = Regex::new(r#""description":"((?:[^"\\]|\\.)*)""#).unwrap()
-        .captures(&resp).map(|c| c[1].replace("\\n", "\n").replace("\\\"", "\"")).unwrap_or_default();
-    let thumbnail = Regex::new(r#""thumbnail":"([^"]*)"#).unwrap()
-        .captures(&resp).map(|c| c[1].to_string()).unwrap_or_default();
-    let status = Regex::new(r#""status":"([^"]*)"#).unwrap()
-        .captures(&resp).map(|c| c[1].to_string()).unwrap_or_else(|| "Unknown".to_string());
-    let genres: Vec<String> = Regex::new(r#""genres":\[([^\]]*)\]"#).unwrap()
-        .captures(&resp)
-        .map(|c| c[1].split(',').map(|s| s.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty()).collect())
+    let show = json.pointer("/data/show").ok_or_else(|| "Not found".to_string())?;
+    let text = |key: &str| show.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let genres = show.get("genres").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|g| g.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    let ep_count = Regex::new(r#""sub":\s*(\d+)"#).unwrap()
-        .captures(&resp).and_then(|c| c[1].parse().ok()).unwrap_or(0);
-    let rating = Regex::new(r#""score":\s*([0-9.]+)"#).unwrap()
-        .captures(&resp).and_then(|c| c[1].parse().ok()).unwrap_or(0.0);
 
-    Ok(AnimeDetails { id: show_id, name, description, thumbnail, genres, status, episode_count: ep_count, rating })
+    Ok(AnimeDetails {
+        id: show_id,
+        name: text("name"),
+        description: text("description"),
+        thumbnail: text("thumbnail"),
+        genres,
+        status: show.get("status").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string(),
+        episode_count: show.pointer("/availableEpisodes/sub").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        rating: show.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0),
+    })
 }
 
 #[tauri::command]
 pub async fn get_popular(mode: String, page: Option<u32>, cache: State<'_, AppCache>) -> Result<Vec<AnimeResult>, String> {
-    let mode = if mode == "dub" { "dub" } else { "sub" };
+    let mode = mode_str(&mode);
     let pg = page.unwrap_or(1);
     let cache_key = format!("popular:{}:{}", mode, pg);
-    if let Some(cached) = cache_valid(&cache.search, &cache_key) { return Ok(cached); }
+    if let Some(cached) = disk_cache_get::<Vec<AnimeResult>>(&cache, "search", &cache_key) { return Ok(cached); }
 
     let gql = r#"query( $type: VaildShowObjectEnumType $page: Int $limit: Int $translationType: VaildTranslationTypeEnumType ) { queryPopular( type: $type page: $page limit: $limit translationType: $translationType ) { recommendations { anyCard { _id name thumbnail score malId availableEpisodes } } }}"#;
-    let body = serde_json::json!({"variables": {"type": "anime", "page": pg, "limit": 40, "translationType": mode}, "query": gql});
+    let body = json!({"variables": {"type": "anime", "page": pg, "limit": 40, "translationType": mode}, "query": gql});
 
     let client = build_client();
     let resp = client.post(format!("{}/api", allanime_api()))
@@ -431,6 +497,7 @@ pub async fn get_popular(mode: String, page: Option<u32>, cache: State<'_, AppCa
         .text().await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
+    let mut mal_pairs = Vec::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
         if let Some(recs) = json.pointer("/data/queryPopular/recommendations").and_then(|v| v.as_array()) {
             for rec in recs {
@@ -441,24 +508,28 @@ pub async fn get_popular(mode: String, page: Option<u32>, cache: State<'_, AppCa
                     let rating = card.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let mal_id = card.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                     let episodes = card.pointer(&format!("/availableEpisodes/{}", mode)).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    if !id.is_empty() { results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id }); }
+                    if !id.is_empty() {
+                        mal_pairs.push((id.clone(), mal_id));
+                        results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id });
+                    }
                 }
             }
         }
     }
-    cache_set(&cache.search, cache_key, results.clone());
+    mal_map_save(mal_pairs);
+    disk_cache_set(&cache, "search", &cache_key, &results);
     Ok(results)
 }
 
 #[tauri::command]
 pub async fn get_recently_updated(mode: String, page: Option<u32>, cache: State<'_, AppCache>) -> Result<Vec<AnimeResult>, String> {
-    let mode = if mode == "dub" { "dub" } else { "sub" };
+    let mode = mode_str(&mode);
     let pg = page.unwrap_or(1);
     let cache_key = format!("recent:{}:{}", mode, pg);
-    if let Some(cached) = cache_valid(&cache.search, &cache_key) { return Ok(cached); }
+    if let Some(cached) = disk_cache_get::<Vec<AnimeResult>>(&cache, "search", &cache_key) { return Ok(cached); }
 
     let gql = r#"query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name thumbnail score malId availableEpisodes __typename } }}"#;
-    let body = serde_json::json!({"variables": {"search": {"allowAdult": false, "allowUnknown": false, "query": ""}, "limit": 40, "page": pg, "translationType": mode, "countryOrigin": "ALL"}, "query": gql});
+    let body = json!({"variables": {"search": {"allowAdult": false, "allowUnknown": false, "query": ""}, "limit": 40, "page": pg, "translationType": mode, "countryOrigin": "ALL"}, "query": gql});
 
     let client = build_client();
     let resp = client.post(format!("{}/api", allanime_api()))
@@ -467,6 +538,7 @@ pub async fn get_recently_updated(mode: String, page: Option<u32>, cache: State<
         .text().await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
+    let mut mal_pairs = Vec::new();
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
         if let Some(edges) = json.pointer("/data/shows/edges").and_then(|v| v.as_array()) {
             for edge in edges {
@@ -476,11 +548,15 @@ pub async fn get_recently_updated(mode: String, page: Option<u32>, cache: State<
                 let rating = edge.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let mal_id = edge.get("malId").and_then(|v| v.as_u64()).unwrap_or(0);
                 let episodes = edge.pointer(&format!("/availableEpisodes/{}", mode)).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                if episodes > 0 { results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id }); }
+                if episodes > 0 {
+                    mal_pairs.push((id.clone(), mal_id));
+                    results.push(AnimeResult { id, name, episodes, thumbnail, rating, mal_id });
+                }
             }
         }
     }
-    cache_set(&cache.search, cache_key, results.clone());
+    mal_map_save(mal_pairs);
+    disk_cache_set(&cache, "search", &cache_key, &results);
     Ok(results)
 }
 
@@ -501,75 +577,28 @@ pub struct DebugInfo {
 
 #[tauri::command]
 pub async fn debug_episode_url(show_id: String, episode: String, mode: String) -> Result<DebugInfo, String> {
-    let mode_str = if mode == "dub" { "dub" } else { "sub" };
-    let episode_gql = r#"query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { episode( showId: $showId translationType: $translationType episodeString: $episodeString ) { episodeString sourceUrls }}"#;
-    let query_hash = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
-    let vars = serde_json::json!({"showId": show_id, "translationType": mode_str, "episodeString": episode});
-    let ext = serde_json::json!({"persistedQuery":{"version":1,"sha256Hash": query_hash}});
-
-    let client = build_client();
-    let vars_str = vars.to_string();
-    let ext_str = ext.to_string();
-    let encoded_vars = vars_str.replace('"', "%22").replace(':', "%3A").replace('{', "%7B").replace('}', "%7D").replace(',', "%2C");
-    let encoded_ext = ext_str.replace('"', "%22").replace(':', "%3A").replace('{', "%7B").replace('}', "%7D").replace(',', "%2C").replace(' ', "%20");
-    let api_url = format!("{}/api?variables={}&extensions={}", allanime_api(), encoded_vars, encoded_ext);
-
-    let mut headers = default_headers();
-    headers.insert("Origin", HeaderValue::from_static("https://youtu-chan.com"));
-    headers.insert(REFERER, HeaderValue::from_static("https://youtu-chan.com"));
-
-    let get_resp = client.get(&api_url).headers(headers).send().await.map_err(|e| e.to_string())?
-        .text().await.map_err(|e| e.to_string())?;
+    let fetch = fetch_source_list(&show_id, &episode, mode_str(&mode)).await?;
+    let sources = parse_sources(&fetch.api_resp);
 
     let mut info = DebugInfo {
-        get_url: api_url.clone(),
-        get_response_len: get_resp.len(),
-        get_response_snippet: get_resp.chars().take(500).collect(),
-        used_post_fallback: false,
-        post_response_len: 0,
-        post_response_snippet: String::new(),
-        has_tobeparsed: false,
-        sources_count: 0,
-        sources: vec![],
+        get_url: fetch.get_url.clone(),
+        get_response_len: fetch.get_resp.len(),
+        get_response_snippet: snippet(&fetch.get_resp, 500).to_string(),
+        used_post_fallback: fetch.post_resp.is_some(),
+        post_response_len: fetch.post_resp.as_ref().map_or(0, |p| p.len()),
+        post_response_snippet: fetch.post_resp.as_ref().map_or(String::new(), |p| snippet(p, 500).to_string()),
+        has_tobeparsed: fetch.api_resp.contains("tobeparsed"),
+        sources_count: sources.len(),
+        sources: sources.clone(),
         decoded_provider_ids: vec![],
         links_per_provider: vec![],
     };
-
-    let api_resp = if get_resp.is_empty() || !get_resp.contains("tobeparsed") {
-        info.used_post_fallback = true;
-        let body = serde_json::json!({"variables": {"showId": show_id, "translationType": mode_str, "episodeString": episode}, "query": episode_gql});
-        let post_resp = client.post(format!("{}/api", allanime_api()))
-            .headers(default_headers()).header("Content-Type", "application/json")
-            .json(&body).send().await.map_err(|e| e.to_string())?
-            .text().await.map_err(|e| e.to_string())?;
-        info.post_response_len = post_resp.len();
-        info.post_response_snippet = post_resp.chars().take(500).collect();
-        post_resp
-    } else { get_resp.clone() };
-
-    info.has_tobeparsed = api_resp.contains("tobeparsed");
-
-    let sources: Vec<(String, String)> = if api_resp.contains("tobeparsed") {
-        Regex::new(r#""tobeparsed":"([^"]*)""#).unwrap().captures(&api_resp)
-            .map(|cap| decrypt_tobeparsed(&cap[1])).unwrap_or_default()
-    } else {
-        let mut s: Vec<(String, String)> = Regex::new(r#""sourceUrl":"--([^"]*)".*?"sourceName":"([^"]*)""#).unwrap()
-            .captures_iter(&api_resp).map(|c| (c[2].to_string(), c[1].to_string())).collect();
-        if s.is_empty() {
-            s = Regex::new(r#""sourceName":"([^"]*)".*?"sourceUrl":"--([^"]*)""#).unwrap()
-                .captures_iter(&api_resp).map(|c| (c[1].to_string(), c[2].to_string())).collect();
-        }
-        s
-    };
-
-    info.sources_count = sources.len();
-    info.sources = sources.clone();
 
     for (name, eid) in &sources {
         let pid = decode_provider_id(eid);
         info.decoded_provider_ids.push(pid.clone());
         if !pid.is_empty() {
-            let links = fetch_links(pid.clone()).await;
+            let links = fetch_links(pid).await;
             info.links_per_provider.push((name.clone(), links.len()));
         }
     }
@@ -579,30 +608,64 @@ pub async fn debug_episode_url(show_id: String, episode: String, mode: String) -
 
 #[tauri::command]
 pub async fn get_thumbnail_fallback(name: String, mal_id: Option<u64>) -> Result<String, String> {
-    let client = build_client();
     // If we have MAL ID, use it directly (faster, more accurate)
-    if let Some(id) = mal_id {
-        if id > 0 {
-            let url = format!("https://api.jikan.moe/v4/anime/{}", id);
-            if let Ok(resp) = client.get(&url).send().await {
-                if let Ok(text) = resp.text().await {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(img) = json.pointer("/data/images/jpg/large_image_url").and_then(|v| v.as_str()) {
-                            return Ok(img.to_string());
-                        }
-                    }
-                }
+    if let Some(id) = mal_id.filter(|&id| id > 0) {
+        if let Ok(json) = jikan_get(&format!("{}/anime/{}", JIKAN_BASE, id)).await {
+            if let Some(img) = json.pointer("/data/images/jpg/large_image_url").and_then(|v| v.as_str()) {
+                return Ok(img.to_string());
             }
         }
     }
     // Fallback: search by name
-    let url = format!("https://api.jikan.moe/v4/anime?q={}&limit=1", urlencoding::encode(&name));
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?
-        .text().await.map_err(|e| e.to_string())?;
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
-        if let Some(img) = json.pointer("/data/0/images/jpg/large_image_url").and_then(|v| v.as_str()) {
-            return Ok(img.to_string());
-        }
+    let url = format!("{}/anime?q={}&limit=1", JIKAN_BASE, urlencoding::encode(&name));
+    let json = jikan_get(&url).await?;
+    json.pointer("/data/0/images/jpg/large_image_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No thumbnail found".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_provider_ids() {
+        assert_eq!(decode_provider_id("7a7b"), "BC");
+        assert_eq!(decode_provider_id("0809"), "01");
+        assert_eq!(decode_provider_id("4b4b"), "ss");
     }
-    Err("No thumbnail found".to_string())
+
+    #[test]
+    fn snippet_respects_char_boundaries() {
+        assert_eq!(snippet("あいう", 4), "あ");
+        assert_eq!(snippet("abc", 10), "abc");
+    }
+
+    #[test]
+    fn parses_plain_sources_in_both_orders() {
+        let a = r#"{"sourceUrl":"--79","sourceName":"Default"}"#;
+        assert_eq!(parse_sources(a), vec![("Default".to_string(), "79".to_string())]);
+        let b = r#"{"sourceName":"Luf","sourceUrl":"--7a"}"#;
+        assert_eq!(parse_sources(b), vec![("Luf".to_string(), "7a".to_string())]);
+    }
+
+    #[test]
+    fn decrypts_tobeparsed_blob() {
+        let plain = r#""sourceUrl":"--79","sourceName":"Default""#;
+        let iv = [7u8; 12];
+        let mut ctr_iv = [0u8; 16];
+        ctr_iv[..12].copy_from_slice(&iv);
+        ctr_iv[15] = 2;
+        let mut ct = plain.as_bytes().to_vec();
+        let mut cipher = Aes256Ctr::new(derive_key().as_slice().into(), &ctr_iv.into());
+        cipher.apply_keystream(&mut ct);
+
+        let mut blob = vec![0u8];
+        blob.extend_from_slice(&iv);
+        blob.extend_from_slice(&ct);
+        blob.extend_from_slice(&[0u8; 16]);
+        let encoded = STANDARD.encode(&blob);
+        assert_eq!(decrypt_tobeparsed(&encoded), vec![("Default".to_string(), "79".to_string())]);
+    }
 }

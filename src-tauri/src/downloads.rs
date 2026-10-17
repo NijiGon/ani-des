@@ -1,10 +1,17 @@
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::State;
 use tokio::sync::mpsc;
+
+use crate::store;
+
+const DOWNLOADS_FILE: &str = "downloads.json";
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub enum DownloadStatus { Queued, Downloading, Done, Failed }
@@ -31,27 +38,15 @@ pub struct DownloadManager {
     pub cancel_tx: Arc<Mutex<HashMap<String, mpsc::Sender<()>>>>,
 }
 
-fn downloads_db_path() -> PathBuf {
-    let dir = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("ani-des");
-    fs::create_dir_all(&dir).ok();
-    dir.join("downloads.json")
-}
-
-fn load_downloads() -> Vec<DownloadItem> {
-    fs::read_to_string(downloads_db_path()).ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn persist_downloads(items: &[DownloadItem]) {
-    if let Ok(json) = serde_json::to_string_pretty(items) {
-        fs::write(downloads_db_path(), json).ok();
-    }
-}
-
 impl DownloadManager {
     pub fn new() -> Self {
-        let items = load_downloads();
+        let mut items: Vec<DownloadItem> = store::load(DOWNLOADS_FILE);
+        // Anything still active was cut off when the app last closed.
+        for item in items.iter_mut().filter(|i| matches!(i.status, DownloadStatus::Queued | DownloadStatus::Downloading)) {
+            item.status = DownloadStatus::Failed;
+            item.error = Some("Interrupted when the app closed".to_string());
+        }
+        store::save(DOWNLOADS_FILE, &items);
         Self { items: Arc::new(Mutex::new(items)), cancel_tx: Arc::new(Mutex::new(HashMap::new())) }
     }
 }
@@ -67,12 +62,27 @@ fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
+fn check_within(base: &Path, file: &Path) -> Result<PathBuf, String> {
+    let base = base.canonicalize().map_err(|e| e.to_string())?;
+    let file = file.canonicalize().map_err(|e| e.to_string())?;
+    if file.starts_with(&base) && file.is_file() {
+        Ok(file)
+    } else {
+        Err("File is outside the download folder".to_string())
+    }
+}
+
+/// Canonical path of a downloaded file, or an error if it is not inside the download folder.
+pub fn resolve_download_file(path: &str) -> Result<PathBuf, String> {
+    check_within(&download_dir(), Path::new(path))
+}
+
 #[tauri::command]
 pub async fn start_download(anime_id: String, anime_name: String, episode: String, mode: String, dm: State<'_, DownloadManager>) -> Result<String, String> {
     let id = format!("{}_{}", anime_id, episode);
     {
         let items = dm.items.lock().unwrap();
-        if items.iter().any(|i| i.id == id && (i.status == DownloadStatus::Downloading || i.status == DownloadStatus::Done)) {
+        if items.iter().any(|i| i.id == id && matches!(i.status, DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Done)) {
             return Err("Already downloaded or in progress".to_string());
         }
     }
@@ -89,28 +99,44 @@ pub async fn start_download(anime_id: String, anime_name: String, episode: Strin
     let items_arc = dm.items.clone();
     let cancel_arc = dm.cancel_tx.clone();
     let (tx, mut rx) = mpsc::channel::<()>(1);
-    { cancel_arc.lock().unwrap().insert(id.clone(), tx); }
+    cancel_arc.lock().unwrap().insert(id.clone(), tx);
 
+    let task_id = id.clone();
     tokio::spawn(async move {
         do_download(id, anime_id, anime_name, episode, mode, items_arc, &mut rx).await;
+        cancel_arc.lock().unwrap().remove(&task_id);
     });
 
     Ok("queued".to_string())
 }
 
+fn with_item(items: &Arc<Mutex<Vec<DownloadItem>>>, id: &str, f: impl FnOnce(&mut DownloadItem)) {
+    if let Ok(mut list) = items.lock() {
+        if let Some(item) = list.iter_mut().find(|i| i.id == id) { f(item); }
+    }
+}
+
+/// Changes an item and persists the list. Use for status changes, not per-chunk progress.
+fn update_item(items: &Arc<Mutex<Vec<DownloadItem>>>, id: &str, f: impl FnOnce(&mut DownloadItem)) {
+    if let Ok(mut list) = items.lock() {
+        if let Some(item) = list.iter_mut().find(|i| i.id == id) { f(item); }
+        store::save(DOWNLOADS_FILE, &*list);
+    }
+}
+
+fn fail(items: &Arc<Mutex<Vec<DownloadItem>>>, id: &str, msg: String) {
+    update_item(items, id, |i| { i.status = DownloadStatus::Failed; i.error = Some(msg); });
+}
+
 async fn do_download(id: String, anime_id: String, anime_name: String, episode: String, mode: String, items: Arc<Mutex<Vec<DownloadItem>>>, cancel: &mut mpsc::Receiver<()>) {
-    // Update status to downloading
     update_item(&items, &id, |i| { i.status = DownloadStatus::Downloading; i.progress = 5.0; });
 
-    // Get episode URL
     let links = match get_links_for_download(&anime_id, &episode, &mode).await {
         Ok(l) => l,
-        Err(e) => { update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some(e); }); return; }
+        Err(e) => return fail(&items, &id, e),
     };
-
-    let url = match links.first() {
-        Some(l) => l.clone(),
-        None => { update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some("No sources".to_string()); }); return; }
+    let Some(url) = links.into_iter().next() else {
+        return fail(&items, &id, "No direct video source (HLS-only streams cannot be downloaded yet)".to_string());
     };
 
     update_item(&items, &id, |i| i.progress = 15.0);
@@ -119,117 +145,64 @@ async fn do_download(id: String, anime_id: String, anime_name: String, episode: 
     fs::create_dir_all(&dir).ok();
     let file_path = dir.join(format!("Episode_{}.mp4", episode));
 
-    // Download the file
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300)).build().unwrap();
+    // Connect timeout only: a whole-download timeout would kill long files on slow links.
+    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build().unwrap();
     let resp = match client.get(&url)
         .header("Referer", "https://allmanga.to")
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0")
         .send().await {
         Ok(r) => r,
-        Err(e) => { update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some(e.to_string()); }); return; }
+        Err(e) => return fail(&items, &id, e.to_string()),
     };
 
     let total = resp.content_length().unwrap_or(0);
-    let mut downloaded: u64 = 0;
+    update_item(&items, &id, |i| i.total_bytes = total);
     let mut file = match fs::File::create(&file_path) {
         Ok(f) => f,
-        Err(e) => { update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some(e.to_string()); }); return; }
+        Err(e) => return fail(&items, &id, e.to_string()),
     };
 
-    use std::io::Write;
-    use futures::StreamExt;
     let mut stream = resp.bytes_stream();
-
-    while let Some(chunk_result) = stream.next().await {
-        // Check cancel
-        if cancel.try_recv().is_ok() {
-            update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some("Cancelled".to_string()); });
-            fs::remove_file(&file_path).ok();
-            return;
-        }
-        match chunk_result {
-            Ok(bytes) => {
-                if file.write_all(&bytes).is_err() {
-                    update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some("Write error".to_string()); });
-                    return;
-                }
-                downloaded += bytes.len() as u64;
-                let pct = if total > 0 { 15.0 + (downloaded as f64 / total as f64) * 85.0 } else { 50.0 };
-                update_item(&items, &id, |i| { i.progress = pct; i.downloaded_bytes = downloaded; i.total_bytes = total; });
+    let mut downloaded: u64 = 0;
+    loop {
+        let chunk = tokio::select! {
+            Some(_) = cancel.recv() => {
+                fs::remove_file(&file_path).ok();
+                return fail(&items, &id, "Cancelled".to_string());
             }
-            Err(e) => { update_item(&items, &id, |i| { i.status = DownloadStatus::Failed; i.error = Some(e.to_string()); }); return; }
+            c = stream.next() => c,
+        };
+        let Some(chunk) = chunk else { break };
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(e) => {
+                fs::remove_file(&file_path).ok();
+                return fail(&items, &id, e.to_string());
+            }
+        };
+        if file.write_all(&bytes).is_err() {
+            fs::remove_file(&file_path).ok();
+            return fail(&items, &id, "Write error".to_string());
         }
+        downloaded += bytes.len() as u64;
+        let pct = if total > 0 { 15.0 + (downloaded as f64 / total as f64) * 85.0 } else { 50.0 };
+        with_item(&items, &id, |i| { i.progress = pct; i.downloaded_bytes = downloaded; });
     }
 
-    update_item(&items, &id, |i| { i.status = DownloadStatus::Done; i.progress = 100.0; i.file_path = file_path.to_string_lossy().to_string(); });
+    update_item(&items, &id, |i| {
+        i.status = DownloadStatus::Done;
+        i.progress = 100.0;
+        i.downloaded_bytes = downloaded;
+        i.file_path = file_path.to_string_lossy().to_string();
+    });
 }
 
-fn update_item(items: &Arc<Mutex<Vec<DownloadItem>>>, id: &str, f: impl FnOnce(&mut DownloadItem)) {
-    if let Ok(mut list) = items.lock() {
-        if let Some(item) = list.iter_mut().find(|i| i.id == id) { f(item); }
-        persist_downloads(&list);
-    }
-}
-
+/// Direct (non-HLS) file URLs for an episode, in provider order.
 async fn get_links_for_download(show_id: &str, episode: &str, mode: &str) -> Result<Vec<String>, String> {
-    use crate::api::{build_client, default_headers, allanime_api, decode_provider_id, decrypt_tobeparsed, fetch_links};
-    use reqwest::header::{HeaderValue, REFERER};
-    use regex::Regex;
-
-    let mode_str = mode;
-    let episode_gql = r#"query ($showId: String!, $translationType: VaildTranslationTypeEnumType!, $episodeString: String!) { episode( showId: $showId translationType: $translationType episodeString: $episodeString ) { episodeString sourceUrls }}"#;
-    let query_hash = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
-    let vars = serde_json::json!({"showId": show_id, "translationType": mode_str, "episodeString": episode});
-    let ext = serde_json::json!({"persistedQuery":{"version":1,"sha256Hash": query_hash}});
-
-    let client = build_client();
-    let vars_str = vars.to_string();
-    let ext_str = ext.to_string();
-    let encoded_vars = urlencoding::encode(&vars_str);
-    let encoded_ext = urlencoding::encode(&ext_str);
-    let api_url = format!("{}/api?variables={}&extensions={}", allanime_api(), encoded_vars, encoded_ext);
-
-    let mut headers = default_headers();
-    headers.insert("Origin", HeaderValue::from_static("https://youtu-chan.com"));
-    headers.insert(REFERER, HeaderValue::from_static("https://youtu-chan.com"));
-
-    let resp = client.get(&api_url).headers(headers).send().await.map_err(|e| e.to_string())?
-        .text().await.map_err(|e| e.to_string())?;
-
-    let api_resp = if resp.is_empty() || !resp.contains("tobeparsed") {
-        let body = serde_json::json!({"variables": {"showId": show_id, "translationType": mode_str, "episodeString": episode}, "query": episode_gql});
-        client.post(format!("{}/api", allanime_api()))
-            .headers(default_headers()).header("Content-Type", "application/json")
-            .json(&body).send().await.map_err(|e| e.to_string())?
-            .text().await.map_err(|e| e.to_string())?
-    } else { resp };
-
-    let sources: Vec<(String, String)> = if api_resp.contains("tobeparsed") {
-        Regex::new(r#""tobeparsed":"([^"]*)""#).unwrap().captures(&api_resp)
-            .map(|cap| decrypt_tobeparsed(&cap[1])).unwrap_or_default()
-    } else {
-        Regex::new(r#""sourceUrl":"--([^"]*)".*?"sourceName":"([^"]*)""#).unwrap()
-            .captures_iter(&api_resp).map(|c| (c[2].to_string(), c[1].to_string())).collect()
-    };
-
-    let futs: Vec<_> = sources.iter()
-        .map(|(_, eid)| decode_provider_id(eid))
-        .filter(|id| !id.is_empty())
-        .map(|id| fetch_links(id)).collect();
-    let all: Vec<String> = futures::future::join_all(futs).await.into_iter().flatten()
-        .filter(|l| !l.url.contains(".m3u8")) // prefer direct mp4 for downloads
-        .map(|l| l.url).collect();
-
-    if all.is_empty() {
-        // fallback: include m3u8
-        let futs2: Vec<_> = sources.iter()
-            .map(|(_, eid)| decode_provider_id(eid))
-            .filter(|id| !id.is_empty())
-            .map(|id| fetch_links(id)).collect();
-        let all2: Vec<String> = futures::future::join_all(futs2).await.into_iter().flatten().map(|l| l.url).collect();
-        return Ok(all2);
-    }
-    Ok(all)
+    let fetch = crate::api::fetch_source_list(show_id, episode, mode).await?;
+    let sources = crate::api::parse_sources(&fetch.api_resp);
+    let links = crate::api::resolve_sources(&sources).await;
+    Ok(links.into_iter().map(|l| l.url).filter(|u| !u.contains(".m3u8")).collect())
 }
 
 #[tauri::command]
@@ -256,20 +229,49 @@ pub async fn cancel_download(id: String, dm: State<'_, DownloadManager>) -> Resu
 pub async fn remove_download(id: String, dm: State<'_, DownloadManager>) -> Result<(), String> {
     let mut items = dm.items.lock().unwrap();
     if let Some(item) = items.iter().find(|i| i.id == id) {
-        if !item.file_path.is_empty() { fs::remove_file(&item.file_path).ok(); }
+        if let Ok(path) = resolve_download_file(&item.file_path) { fs::remove_file(path).ok(); }
     }
     items.retain(|i| i.id != id);
-    persist_downloads(&items);
+    store::save(DOWNLOADS_FILE, &*items);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn open_download_folder() -> Result<(), String> {
-    let dir = download_dir();
-    open::that(dir).map_err(|e| e.to_string())
+    open::that(download_dir()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn open_file(path: String) -> Result<(), String> {
-    open::that(&path).map_err(|e| e.to_string())
+    let file = resolve_download_file(&path)?;
+    open::that(file).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_path_characters() {
+        assert_eq!(sanitize("a/b:c d"), "a_b_c d");
+    }
+
+    #[test]
+    fn check_within_rejects_files_outside_base() {
+        let root = std::env::temp_dir().join(format!("anides-dl-{}", std::process::id()));
+        let inside = root.join("show");
+        let outside = std::env::temp_dir().join(format!("anides-out-{}", std::process::id()));
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let ok_file = inside.join("ep.mp4");
+        let bad_file = outside.join("secret.txt");
+        fs::write(&ok_file, b"x").unwrap();
+        fs::write(&bad_file, b"x").unwrap();
+
+        assert!(check_within(&root, &ok_file).is_ok());
+        assert!(check_within(&root, &bad_file).is_err());
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
 }

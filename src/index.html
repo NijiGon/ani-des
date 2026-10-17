@@ -43,7 +43,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-h
 /* Skeleton */
 .skel{background:linear-gradient(90deg,var(--s1) 25%,var(--s2) 50%,var(--s1) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:var(--r)}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
-.skel-card{aspect-ratio:3/4;border-radius:var(--r)}
+.skel-card{width:100%;aspect-ratio:3/4;border-radius:var(--r)}
 .skel-text{height:12px;border-radius:4px;margin-bottom:6px}
 /* Cards */
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-top:10px}
@@ -122,6 +122,10 @@ video{width:100%;display:block;cursor:pointer;max-height:70vh}
 .vol-s{width:50px;height:3px;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.25);border-radius:3px;outline:none;cursor:pointer}
 .vol-s::-webkit-slider-thumb{-webkit-appearance:none;width:8px;height:8px;background:#fff;border-radius:50%;cursor:pointer}
 .spd{font-size:9px;color:rgba(255,255,255,.7);background:rgba(255,255,255,.1);border:none;border-radius:3px;padding:2px 5px;cursor:pointer;font-family:inherit}.spd:hover{background:rgba(255,255,255,.2);color:#fff}
+.skip-btn{position:absolute;bottom:50px;right:16px;background:rgba(0,212,170,.9);color:#080b12;border:none;border-radius:6px;padding:8px 16px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;z-index:10;transition:opacity .3s,transform .2s;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+.skip-btn:hover{transform:scale(1.05)}.skip-btn.hidden{opacity:0;pointer-events:none}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.3);border-top-color:#00d4aa;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 /* Loader */
 .loader{margin:16px 0}.lbar{width:100%;height:3px;background:var(--border);border-radius:3px;overflow:hidden}
 .lfill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:3px;transition:width .3s}
@@ -158,17 +162,26 @@ let navHistory=[],navIndex=-1,navLock=false;
 
 function pushNav(){
   if(navLock)return;
-  const snap=JSON.parse(JSON.stringify({view:S.view,anime:S.anime,details:S.details,episodes:S.episodes,results:S.results,query:S.query,currentEp:S.currentEp}));
+  const html=document.getElementById('app')?.innerHTML||'';
+  const snap={view:S.view,anime:S.anime?JSON.parse(JSON.stringify(S.anime)):null,details:S.details?JSON.parse(JSON.stringify(S.details)):null,episodes:[...S.episodes],results:S.results,query:S.query,currentEp:S.currentEp,html,scrollY:window.scrollY};
   navHistory=navHistory.slice(0,navIndex+1);
   navHistory.push(snap);navIndex=navHistory.length-1;
 }
+function updateNavSnap(){if(navIndex>=0&&navHistory[navIndex]){navHistory[navIndex].html=document.getElementById('app')?.innerHTML||'';navHistory[navIndex].scrollY=window.scrollY;}}
 function navBack(){
-  if(navIndex<=0)return;navIndex--;navLock=true;
-  const snap=navHistory[navIndex];Object.assign(S,snap);render();navLock=false;
+  if(navIndex<=0)return;updateNavSnap();navIndex--;navLock=true;
+  restoreSnap(navHistory[navIndex]);
 }
 function navForward(){
-  if(navIndex>=navHistory.length-1)return;navIndex++;navLock=true;
-  const snap=navHistory[navIndex];Object.assign(S,snap);render();navLock=false;
+  if(navIndex>=navHistory.length-1)return;updateNavSnap();navIndex++;navLock=true;
+  restoreSnap(navHistory[navIndex]);
+}
+function restoreSnap(snap){
+  S.view=snap.view;S.anime=snap.anime;S.details=snap.details;S.episodes=snap.episodes;S.results=snap.results;S.query=snap.query;S.currentEp=snap.currentEp;
+  const app=document.getElementById('app');
+  if(app&&snap.html)app.innerHTML=snap.html;
+  requestAnimationFrame(()=>requestAnimationFrame(()=>window.scrollTo(0,snap.scrollY||0)));
+  navLock=false;
 }
 
 async function uc(){try{const s=await invoke('get_cache_stats');document.getElementById('cbadge').textContent=`${s.search_entries+s.episode_entries+s.link_entries} cached`;}catch(e){}}
@@ -189,9 +202,8 @@ function render(){
         <span class="flabel" style="margin-left:8px">Origin</span><div class="fgroup">${['ALL','JP','CN','KR'].map(c=>`<button class="btn bg ${S.country===c?'active':''}" onclick="S.country='${c}'">${c}</button>`).join('')}</div>
       </div>
       <div id="hist"></div>
-      <div id="recent">${skelCards(6)}</div>
-      <div id="popular"></div>`;
-    loadHistory();loadHome();
+      <div id="recent"><div class="section-header"><span class="slabel">Currently Airing</span></div><div class="cards">${skelCards(6)}</div></div>`;
+    loadHistory();if(!navLock)loadHome();
 
   }else if(S.view==='search'){
     app.innerHTML=`
@@ -204,7 +216,6 @@ function render(){
         <span class="flabel">Mode</span><div class="fgroup"><button class="btn bg ${S.mode==='sub'?'active':''}" onclick="S.mode='sub';doSearch()">Sub</button><button class="btn bg ${S.mode==='dub'?'active':''}" onclick="S.mode='dub';doSearch()">Dub</button></div>
         <span class="flabel" style="margin-left:8px">Origin</span><div class="fgroup">${['ALL','JP','CN','KR'].map(c=>`<button class="btn bg ${S.country===c?'active':''}" onclick="S.country='${c}';doSearch()">${c}</button>`).join('')}</div>
       </div>
-      </div>
       <div id="status" class="status-msg"></div>
       <div class="cards" id="results">${S.results.length?'':skelCards(8)}</div>`;
     if(S.results.length)renderCards();
@@ -214,26 +225,26 @@ function render(){
     if(!d){app.innerHTML=bc()+`<div style="margin-top:16px">${skelCards(1)}</div>`;return;}
     app.innerHTML=bc()+`
       <div class="detail" style="margin-top:10px">
-        <div class="detail-thumb">${d.thumbnail?`<img src="${d.thumbnail}"/>`:'<div style="height:180px" class="skel"></div>'}</div>
+        <div class="detail-thumb">${d.thumbnail?`<img src="${esc(d.thumbnail)}"/>`:'<div style="height:180px" class="skel"></div>'}</div>
         <div class="detail-info">
-          <div class="detail-title">${d.name}</div>
-          ${d.title_romaji&&d.title_romaji!==d.name?`<div style="font-size:10px;color:var(--text2);margin-bottom:5px">${d.title_romaji}</div>`:''}
+          <div class="detail-title">${esc(d.name)}</div>
+          ${d.title_romaji&&d.title_romaji!==d.name?`<div style="font-size:10px;color:var(--text2);margin-bottom:5px">${esc(d.title_romaji)}</div>`:''}
           <div class="detail-meta">
-            ${d.status?`<span class="tag st">${d.status}</span>`:''}
+            ${d.status?`<span class="tag st">${esc(d.status)}</span>`:''}
             <span class="tag">${d.episode_count||S.episodes.length} ep</span>
             ${d.rating?`<span class="tag" style="color:#ffd700;border-color:#ffd700">★ ${d.rating.toFixed(1)}</span>`:''}
-            ${(d.genres||[]).map(g=>`<span class="tag">${g}</span>`).join('')}
+            ${(d.genres||[]).map(g=>`<span class="tag">${esc(g)}</span>`).join('')}
           </div>
-          <div class="detail-desc">${cleanDesc(d.description)}</div>
+          <div class="detail-desc">${esc(cleanDesc(d.description))}</div>
           <div style="margin-top:8px;display:flex;gap:6px"><button class="btn bp" onclick="if(S.episodes.length)getLinks(S.episodes[0])">▶ Watch</button><select class="sinput" style="width:auto;padding:5px 8px;font-size:10px" onchange="addToLibrary(this.value)"><option value="">+ Library</option><option value="watching">Watching</option><option value="plan_to_watch">Plan to Watch</option><option value="finished">Finished</option><option value="dropped">Dropped</option></select></div>
         </div>
       </div>
       <div class="slabel" style="display:flex;justify-content:space-between;align-items:center"><span>Episodes</span><div style="display:flex;gap:4px"><button class="btn bg" onclick="toggleBulk()" id="bulkbtn">Select</button><button class="btn bp" id="dlselbtn" style="display:none" onclick="downloadSelected()">↓ DL</button></div></div>
-      <div class="epgrid" id="epgrid">${S.episodes.length?S.episodes.map(ep=>`<button class="btn bg ep-btn" data-ep="${ep}" onclick="epClick('${ep}',event)">${ep}</button>`).join(''):'<div class="status-msg" id="ep-loading">Loading episodes...</div>'}</div>
+      <div class="epgrid" id="epgrid">${S.episodes.length?S.episodes.map(ep=>`<button class="btn bg ep-btn" data-ep="${esc(ep)}" onclick="epClick(this.dataset.ep,event)">${esc(ep)}</button>`).join(''):Array(12).fill('<div class="skel" style="width:100%;height:30px;border-radius:4px"></div>').join('')}</div>
       <div id="status" class="status-msg"></div>`;
 
   }else if(S.view==='loading'){
-    app.innerHTML=bc()+`<div class="ep-now">${S.anime.name} — Ep ${S.currentEp}</div><div class="loader"><div class="lbar"><div class="lfill" id="pbar"></div></div><div class="ltxt" id="ptxt">Fetching sources...</div></div>`;
+    app.innerHTML=bc()+`<div class="ep-now">${esc(S.anime.name)} — Ep ${esc(S.currentEp)}</div><div class="loader"><div class="lbar"><div class="lfill" id="pbar"></div></div><div class="ltxt" id="ptxt">Fetching sources...</div></div>`;
     animProg();
 
   }else if(S.view==='player'){
@@ -241,9 +252,10 @@ function render(){
     app.innerHTML=bc()+`
       <div class="player-layout" style="margin-top:8px">
         <div class="player-main">
-          <div class="ep-now">Episode ${S.currentEp}</div>
+          <div class="ep-now">Episode ${esc(S.currentEp)}</div>
           <div class="player-wrap" id="pwrap">
             <video id="vp" onclick="togglePlay()"></video>
+            <button class="skip-btn hidden" id="skipbtn" onclick="doSkip()">Skip ▶</button>
             <div class="ctrls" onclick="event.stopPropagation()">
               <div class="seekbar" id="seekbar" onclick="event.stopPropagation();seek(event)"><div class="seek-buf" id="seekbuf"></div><div class="seek-prog" id="seekprog"></div></div>
               <div class="crow">
@@ -265,10 +277,10 @@ function render(){
             <div class="left"><button class="btn bg" ${idx>0?'':'disabled'} onclick="prevEp()">◀ Prev</button><button class="btn bp" ${idx<S.episodes.length-1?'':'disabled'} onclick="nextEp()">Next ▶</button></div>
             <div class="right"><label class="toggle"><input type="checkbox" ${S.autoNext?'checked':''} onchange="S.autoNext=this.checked">Auto-next</label></div>
           </div>
-          <div class="qrow">${S.links.map((l,i)=>`<button class="btn ${i===0?'bp':'bg'} qbtn" onclick="playSrc(${i})">${l.quality||'default'}</button>`).join('')}</div>
+          <div class="qrow">${S.links.map((l,i)=>`<button class="btn ${i===0?'bp':'bg'} qbtn" onclick="playSrc(${i})">${esc(l.quality||'default')}</button>`).join('')}</div>
           <div id="status" class="status-msg">${S.links.length?'':'No sources. <button class="btn bg" onclick="debugSources()" style="margin-left:6px">Debug</button>'}</div>
         </div>
-        <div class="player-sidebar"><div class="slabel" style="margin-top:0">Episodes</div>${S.episodes.map(ep=>`<div class="ep-item ${ep===S.currentEp?'active':''}" onclick="getLinks('${ep}')">Ep ${ep}</div>`).join('')}</div>
+        <div class="player-sidebar"><div class="slabel" style="margin-top:0">Episodes</div>${S.episodes.map(ep=>`<div class="ep-item ${ep===S.currentEp?'active':''}" onclick="getLinks(${js(ep)})">Ep ${esc(ep)}</div>`).join('')}</div>
       </div>`;
     if(S.links.length)playSrc(0);
 
@@ -280,7 +292,7 @@ function render(){
     loadLibrary();
 
   }else if(S.view==='bookmarks'){
-    app.innerHTML=bc()+`<div class="slabel">Bookmarks</div><ul class="list">${S.bookmarks.map((b,i)=>`<li class="li" onclick="loadBm(${i})"><div><span class="t">${b.name}</span><br><span style="font-size:9px;color:var(--text2)">${b.query} · ${b.mode} · ${b.country}</span></div><span class="del" onclick="event.stopPropagation();delBm('${b.id}')">✕</span></li>`).join('')}</ul>${S.bookmarks.length?'':'<div class="status-msg">No bookmarks</div>'}`;
+    app.innerHTML=bc()+`<div class="slabel">Bookmarks</div><ul class="list">${S.bookmarks.map((b,i)=>`<li class="li" onclick="loadBm(${i})"><div><span class="t">${esc(b.name)}</span><br><span style="font-size:9px;color:var(--text2)">${esc(b.query)} · ${esc(b.mode)} · ${esc(b.country)}</span></div><span class="del" onclick="event.stopPropagation();delBm(${js(b.id)})">✕</span></li>`).join('')}</ul>${S.bookmarks.length?'':'<div class="status-msg">No bookmarks</div>'}`;
 
   }else if(S.view==='downloads'){
     app.innerHTML=bc()+`<div class="slabel" style="display:flex;justify-content:space-between;align-items:center"><span>Downloads</span><button class="btn bg" onclick="invoke('open_download_folder')">Open Folder</button></div><ul class="list" id="dl-list"></ul>`;
@@ -291,6 +303,10 @@ function render(){
 </script>
 
 <script>
+// Escaping: API data is untrusted. esc() for text and attribute values; js() for JS arguments inside onclick attributes.
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function js(s){return esc(JSON.stringify(s));}
+
 // Autocomplete
 function cleanDesc(s){if(!s)return'No description.';return s.replace(/<br\s*\/?>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/\n{3,}/g,'\n\n').trim();}
 function acSelect(i){document.getElementById('aclist')?.classList.remove('show');S.results=window._acResults||[];openDetail(i);}
@@ -301,68 +317,73 @@ function onSearchInput(e){
     try{const r=await invoke('search_anime',{query:q,mode:S.mode,country:'ALL'});
     const el=document.getElementById('aclist');if(!el)return;
     if(!r.length){el.classList.remove('show');return;}
-    el.innerHTML=r.slice(0,8).map((a,i)=>`<div class="ac-item" onclick="acSelect(${i})">${a.name} <span style="color:var(--text2)">(${a.episodes} ep)</span></div>`).join('');
+    el.innerHTML=r.slice(0,8).map((a,i)=>`<div class="ac-item" onclick="acSelect(${i})">${esc(a.name)}<span style="color:var(--text2)">(${a.episodes} ep)</span></div>`).join('');
     window._acResults=r.slice(0,8);
     el.classList.add('show');}catch(e){}
   },400);
 }
 
 function renderCards(){
-  document.getElementById('results').innerHTML=S.results.map((r,i)=>`<div class="card" onclick="openDetail(${i})">${r.thumbnail?`<img class="card-img" src="${r.thumbnail}" onerror="this.parentElement.querySelector('.card-ph')?.remove();this.outerHTML=cardPh()"/>`:`${cardPh()}`}<div class="card-hover"><div class="ch-title">${r.name}</div><div class="ch-meta">${r.episodes} ep${r.rating?` · ★${r.rating.toFixed(1)}`:''}</div></div><div class="card-body"><div class="card-title">${r.name}</div><div class="card-meta">${r.episodes} ep${r.rating?` · ★${r.rating.toFixed(1)}`:''}</div></div></div>`).join('');
+  document.getElementById('results').innerHTML=S.results.map((r,i)=>`<div class="card" onclick="openDetail(${i})">${r.thumbnail?`<img class="card-img" src="${esc(r.thumbnail)}" onerror="this.parentElement.querySelector('.card-ph')?.remove();this.outerHTML=cardPh()"/>`:`${cardPh()}`}<div class="card-hover"><div class="ch-title">${esc(r.name)}</div><div class="ch-meta">${r.episodes} ep${r.rating?` · ★${r.rating.toFixed(1)}`:''}</div></div><div class="card-body"><div class="card-title">${esc(r.name)}</div><div class="card-meta">${r.episodes} ep${r.rating?` · ★${r.rating.toFixed(1)}`:''}</div></div></div>`).join('');
 }
 function cardPh(){return `<div class="card-ph" style="width:100%;aspect-ratio:3/4;background:var(--s2);display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="20" rx="2"/><circle cx="8" cy="8" r="2"/><path d="M21 15l-5-5L5 21"/></svg></div>`;}
-function tryThumbFallback(img,name,malId){if(img.dataset.tried)return;img.dataset.tried='1';invoke('get_thumbnail_fallback',{name,malId:malId||null}).then(url=>{if(url){img.src=url;img.style.display='';}else img.outerHTML=cardPh();}).catch(()=>img.outerHTML=cardPh());}
+function tryThumbFallback(img){if(img.dataset.tried)return;img.dataset.tried='1';invoke('get_thumbnail_fallback',{name:img.dataset.name,malId:Number(img.dataset.mal)||null}).then(url=>{if(url){img.src=url;img.style.display='';}else img.outerHTML=cardPh();}).catch(()=>img.outerHTML=cardPh());}
 
 function sortR(){if(S.sort==='name')S.results.sort((a,b)=>a.name.localeCompare(b.name));else if(S.sort==='episodes')S.results.sort((a,b)=>b.episodes-a.episodes);else if(S.sort==='rating')S.results.sort((a,b)=>(b.rating||0)-(a.rating||0));if(S.results.length)renderCards();document.querySelectorAll('.sort-btn').forEach(b=>b.classList.toggle('active',b.dataset.sort===S.sort));}
 
 // Home
+function restoreHomeFromCache(){
+  const r=document.getElementById('recent');
+  if(r&&window._recent)r.innerHTML=`<div class="section-header"><span class="slabel">Trending</span></div><div class="cards" id="recent-cards">${renderItemCards(window._recent)}</div><div style="text-align:center;margin-top:10px"><button class="btn bg" id="recent-more" onclick="expandSection('recent')">View more</button></div>`;
+}
 async function loadHome(){
   function sec(el,label,items,id){
     if(!el||!items.length)return;
-    const shown=items.slice(0,12);
     el.innerHTML=`
-      <div class="section-header">
-        <span class="slabel">${label}</span>
-        <div class="view-toggle">
-          <button class="btn bg ${S.viewMode==='grid'?'active':''}" onclick="S.viewMode='grid';document.querySelectorAll('.cards').forEach(c=>c.classList.remove('list-view'))">▦</button>
-          <button class="btn bg ${S.viewMode==='list'?'active':''}" onclick="S.viewMode='list';document.querySelectorAll('.cards').forEach(c=>c.classList.add('list-view'))">☰</button>
-        </div>
+      <div class="section-header"><span class="slabel">${label}</span>
+        <div class="view-toggle"><button class="btn bg ${S.viewMode==='grid'?'active':''}" onclick="S.viewMode='grid';document.querySelectorAll('.cards').forEach(c=>c.classList.remove('list-view'))">▦</button><button class="btn bg ${S.viewMode==='list'?'active':''}" onclick="S.viewMode='list';document.querySelectorAll('.cards').forEach(c=>c.classList.add('list-view'))">☰</button></div>
       </div>
-      <div class="cards ${S.viewMode==='list'?'list-view':''}" id="${id}-cards">${renderItemCards(shown)}</div>
-      <div style="text-align:center;margin-top:10px"><button class="btn bg" onclick="expandSection('${id}')">View more</button></div>`;
+      <div class="cards ${S.viewMode==='list'?'list-view':''}" id="${id}-cards">${renderItemCards(items)}</div>
+      <div style="text-align:center;margin-top:10px"><button class="btn bg" id="${id}-more" onclick="expandSection('${id}')">View more</button></div>`;
     window['_'+id]=items;
+    updateNavSnap();
   }
-  invoke('get_recently_updated',{mode:S.mode}).then(i=>sec(document.getElementById('recent'),'Trending',i,'recent')).catch(()=>{});
-  invoke('get_popular',{mode:S.mode}).then(i=>sec(document.getElementById('popular'),'Popular',i,'popular')).catch(()=>{});
+  invoke('get_recently_updated',{mode:S.mode,page:1}).then(i=>sec(document.getElementById('recent'),'Trending',i,'recent')).catch(e=>console.error('recent',e));
 }
+function renderItemCardsData(items){return items.map(r=>({mal_id:r.mal_id||0,title:r.name||r.title||'',title_english:r.name||'',image:r.thumbnail||r.cover||'',episodes:r.episodes||0,score:r.rating||r.score||0}));}
+
 
 function renderItemCards(items){
-  return items.map((r,i)=>{
-    const d=JSON.stringify({id:r.id?.toString()||'',name:r.title||r.name||'',thumbnail:r.cover||r.thumbnail||'',episodes:r.episodes||0,rating:r.score||r.rating||0,mal_id:r.mal_id||0}).replace(/"/g,'&quot;');
-    const img=r.cover||r.thumbnail;const name=r.title||r.name||'';const eps=r.episodes||0;const score=r.score||r.rating||0;const malId=r.mal_id||0;
-    return`<div class="card" onclick="openFromHome(${d})">${img?`<img class="card-img" src="${img}" onerror="tryThumbFallback(this,'${name.replace(/'/g,"\\'")}',${malId})" />`:`<img class="card-img" src="" style="display:none" onerror=""/><img class="card-img" src="https://cdn.myanimelist.net/images/anime/${malId>0?malId+'/1':''}.jpg" onerror="tryThumbFallback(this,'${name.replace(/'/g,"\\'")}',${malId})" style="${malId?'':'display:none'}"/>${malId?'':`${cardPh()}`}`}<div class="card-hover"><div class="ch-title">${name}</div><div class="ch-meta">${eps} ep${score?` · ★${score.toFixed(1)}`:''}</div></div><div class="card-body"><div class="card-title">${name}</div><div class="card-meta">${eps} ep${score?` · ★${score.toFixed(1)}`:''}</div></div></div>`;
+  return items.map(r=>{
+    const name=r.title||r.name||'';const img=r.cover||r.thumbnail||'';const eps=r.episodes||0;const score=r.score||r.rating||0;const malId=r.mal_id||0;
+    const d={id:r.id?.toString()||'',name,thumbnail:img,episodes:eps,rating:score,mal_id:malId};
+    return`<div class="card" data-d="${esc(JSON.stringify(d))}" onclick="openFromHomeEl(this)">${img?`<img class="card-img" src="${esc(img)}" data-name="${esc(name)}" data-mal="${malId}" onerror="tryThumbFallback(this)" />`:`${cardPh()}`}<div class="card-hover"><div class="ch-title">${esc(name)}</div><div class="ch-meta">${eps} ep${score?` · ★${score.toFixed(1)}`:''}</div></div><div class="card-body"><div class="card-title">${esc(name)}</div><div class="card-meta">${eps} ep${score?` · ★${score.toFixed(1)}`:''}</div></div></div>`;
   }).join('');
 }
 
 function expandSection(id){
   window['_'+id+'_page']=(window['_'+id+'_page']||1)+1;
   const pg=window['_'+id+'_page'];
-  const cmd=id==='recent'?'get_recently_updated':'get_popular';
-  const btn=document.getElementById(id+'-cards')?.nextElementSibling?.querySelector('button');
-  if(btn)btn.textContent='Loading...';
+  const btn=document.getElementById(id+'-more');
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span>';}
+  const el=document.getElementById(id+'-cards');
+  if(el)el.insertAdjacentHTML('beforeend',skelCards(5));
+  const cmd='get_recently_updated';
   invoke(cmd,{mode:S.mode,page:pg}).then(more=>{
-    if(!more.length){document.getElementById(id+'-cards')?.nextElementSibling?.remove();return;}
+    el?.querySelectorAll('.skel-card')?.forEach(s=>s.closest('.card').remove());
+    if(!more.length){if(btn)btn.parentElement.remove();return;}
     window['_'+id]=(window['_'+id]||[]).concat(more);
-    const el=document.getElementById(id+'-cards');
-    if(el)el.innerHTML=renderItemCards(window['_'+id]);
-    if(btn)btn.textContent='View more';
-  }).catch(()=>{if(btn)btn.textContent='View more';});
+    if(el)el.insertAdjacentHTML('beforeend',renderItemCards(more));
+    if(btn){btn.disabled=false;btn.textContent='View more';}
+    updateNavSnap();
+  }).catch(()=>{el?.querySelectorAll('.skel-card')?.forEach(s=>s.closest('.card').remove());if(btn){btn.disabled=false;btn.textContent='View more';}});
 }
 
+function openFromHomeEl(el){openFromHome(JSON.parse(el.dataset.d));}
 function openFromHome(r){
   S.anime=r;S.results=[r];
   openDetail(0);
-}async function loadHistory(){try{S.history=await invoke('get_history');const el=document.getElementById('hist');if(!S.history.length){el.innerHTML='';return;}el.innerHTML=`<div class="section-header"><span class="slabel">Continue Watching</span></div><div class="cards ${S.viewMode==='list'?'list-view':''}">${S.history.slice(0,6).map(h=>`<div class="card" onclick="resumeH2('${h.id}','${h.mode}')" title="${h.name}">${h.thumbnail?`<img class="card-img" src="${h.thumbnail}" onerror="this.outerHTML=cardPh()"/>`:`${cardPh()}`}<div class="card-body"><div class="card-title">${h.name}</div><div class="card-meta">Ep ${h.episode} · ${fmt(h.progress)}</div></div></div>`).join('')}</div>`;}catch(e){}}
+}async function loadHistory(){try{S.history=await invoke('get_history');const el=document.getElementById('hist');if(!S.history.length){el.innerHTML='';return;}el.innerHTML=`<div class="section-header"><span class="slabel">Continue Watching</span></div><div class="cards ${S.viewMode==='list'?'list-view':''}">${S.history.slice(0,6).map(h=>`<div class="card" onclick="resumeH2(${js(h.id)},${js(h.mode)})" title="${esc(h.name)}">${h.thumbnail?`<img class="card-img" src="${esc(h.thumbnail)}" onerror="this.outerHTML=cardPh()"/>`:`${cardPh()}`}<div class="card-body"><div class="card-title">${esc(h.name)}</div><div class="card-meta">Ep ${esc(h.episode)} · ${fmt(h.progress)}</div></div></div>`).join('')}</div>`;}catch(e){}}
 function fmt(s){const m=Math.floor(s/60),sec=Math.floor(s%60);return m+':'+(sec<10?'0':'')+sec;}
 function fmtBytes(b){if(!b)return'0 B';const u=['B','KB','MB','GB'];let i=0;let v=b;while(v>=1024&&i<3){v/=1024;i++;}return v.toFixed(i?1:0)+' '+u[i];}
 async function resumeH(i){const h=S.history[i];S.anime={id:h.id,name:h.name};S.mode=h.mode;S.resumeProgress=h.progress;const[d,eps]=await Promise.all([invoke('get_anime_details',{showId:h.id}).catch(()=>null),invoke('get_episodes',{showId:h.id,mode:h.mode})]);if(d)S.details=d;S.episodes=eps;S.view='detail';render();getLinks(h.episode);}
@@ -374,7 +395,7 @@ async function loadEpisodesInline(){
     const eps=await invoke('get_episodes',{showId:S.anime.id,mode:S.mode});
     S.episodes=eps;
     const g=document.getElementById('epgrid');
-    if(g&&eps.length)g.innerHTML=eps.map(ep=>`<button class="btn bg ep-btn" data-ep="${ep}" onclick="epClick('${ep}',event)">${ep}</button>`).join('');
+    if(g&&eps.length)g.innerHTML=eps.map(ep=>`<button class="btn bg ep-btn" data-ep="${esc(ep)}" onclick="epClick(this.dataset.ep,event)">${esc(ep)}</button>`).join('');
     else if(g)g.innerHTML='<div class="status-msg">No episodes found</div>';
   }catch(e){const g=document.getElementById('ep-loading');if(g)g.textContent='Error loading episodes';}
 }
@@ -382,10 +403,11 @@ async function openDetail(i){
   S.anime=S.results[i];S.view='detail';S.episodes=[];
   S.details={id:S.anime.id,name:S.anime.name,title_romaji:S.anime.title_romaji||'',thumbnail:S.anime.thumbnail||'',description:'',genres:[],status:'',episode_count:S.anime.episodes,rating:S.anime.rating||0};
   render();pushNav();
-  // Load episodes
   let showId=S.anime.id;
-  try{const eps=await invoke('get_episodes',{showId,mode:S.mode});S.episodes=eps;const g=document.getElementById('epgrid');if(g&&S.view==='detail')g.innerHTML=eps.map(ep=>`<button class="btn bg ep-btn" data-ep="${ep}" onclick="epClick('${ep}',event)">${ep}</button>`).join('')||'<div class="status-msg">No episodes</div>';}catch(e){}
+  try{const eps=await invoke('get_episodes',{showId,mode:S.mode});S.episodes=eps;const g=document.getElementById('epgrid');if(g&&S.view==='detail')g.innerHTML=eps.map(ep=>`<button class="btn bg ep-btn" data-ep="${esc(ep)}" onclick="epClick(this.dataset.ep,event)">${esc(ep)}</button>`).join('')||'<div class="status-msg">No episodes</div>';}catch(e){}
   try{const d=await invoke('get_anime_details',{showId});if(S.view==='detail'){S.details={...S.details,...d};const desc=document.querySelector('.detail-desc');if(desc&&d.description)desc.textContent=cleanDesc(d.description);}}catch(e){}
+  // Enrich with Jikan if mal_id available
+  if(S.anime.mal_id&&S.view==='detail'){invoke('jikan_detail',{malId:S.anime.mal_id}).then(j=>{if(S.view!=='detail')return;if(j.synopsis){const desc=document.querySelector('.detail-desc');if(desc&&!desc.textContent)desc.textContent=cleanDesc(j.synopsis);}if(j.genres?.length){const g=document.querySelector('.detail-genres');if(g)g.innerHTML=j.genres.map(g=>`<span class="tag">${g}</span>`).join('');}}).catch(()=>{});}
 }
 
 // Player
@@ -398,7 +420,7 @@ async function playSrc(i){
   document.querySelectorAll('.qbtn').forEach((b,idx)=>{b.classList.toggle('bp',idx===i);b.classList.toggle('bg',idx!==i);});
   if(window._hls){window._hls.destroy();window._hls=null;}
   let url=S.links[i].url;
-  if(!url.includes('.m3u8')&&!url.startsWith('http://127.0.0.1')){try{url=await invoke('set_proxy_url',{url,referrer:'https://allmanga.to'});url+='?t='+Date.now();}catch(e){}}
+  if(!url.includes('.m3u8')&&!url.startsWith('http://127.0.0.1')){try{url=await invoke('proxy_url',{url,referrer:'https://allmanga.to'});}catch(e){}}
   if(url.includes('.m3u8')){
     if(Hls.isSupported()){const hls=new Hls();hls.loadSource(url);hls.attachMedia(v);hls.on(Hls.Events.MANIFEST_PARSED,()=>{seekR(v);v.play();});hls.on(Hls.Events.ERROR,(_,d)=>{if(d.fatal)document.getElementById('status').textContent='Playback error';});window._hls=hls;}
     else if(v.canPlayType('application/vnd.apple.mpegurl')){v.src=url;v.onloadedmetadata=()=>seekR(v);}
@@ -407,7 +429,9 @@ async function playSrc(i){
   v.onpause=()=>{saveP(v);updPlay();document.getElementById('pwrap')?.classList.add('paused');};
   v.onplay=()=>{updPlay();document.getElementById('pwrap')?.classList.remove('paused');};
   v.onended=()=>{saveP(v);if(S.autoNext)nextEp();};
-  v.ontimeupdate=()=>updSeek(v);v.onprogress=()=>updBuf(v);
+  v.ontimeupdate=()=>{updSeek(v);checkSkip(v);};v.onprogress=()=>updBuf(v);
+  // Load skip times
+  loadSkipTimes();
 }
 
 // Player controls
@@ -424,6 +448,25 @@ const speeds=[.5,.75,1,1.25,1.5,2];let spdIdx=2;
 function cycleSpeed(){spdIdx=(spdIdx+1)%speeds.length;const v=document.getElementById('vp'),b=document.getElementById('speedbtn');if(v)v.playbackRate=speeds[spdIdx];if(b)b.textContent=speeds[spdIdx]+'x';}
 function toggleFS(){const w=document.getElementById('pwrap');if(!w)return;document.fullscreenElement?document.exitFullscreen():w.requestFullscreen();}
 function seekR(v){if(S.resumeProgress&&S.resumeProgress>5){v.currentTime=S.resumeProgress;S.resumeProgress=null;}}
+
+// AniSkip
+let skipTimes=[],currentSkip=null;
+async function loadSkipTimes(){
+  skipTimes=[];currentSkip=null;
+  const malId=S.anime?.mal_id;const ep=parseInt(S.currentEp);
+  if(!malId||!ep)return;
+  try{skipTimes=await invoke('get_skip_times',{malId,episode:ep,epLength:null});}catch(e){}
+}
+function checkSkip(v){
+  const t=v.currentTime;const btn=document.getElementById('skipbtn');if(!btn)return;
+  const active=skipTimes.find(s=>t>=s.start&&t<s.end-1);
+  if(active){
+    currentSkip=active;
+    const label=active.skip_type==='op'?'Skip Opening ▶':active.skip_type==='ed'?'Skip Ending ▶':'Skip ▶';
+    btn.textContent=label;btn.classList.remove('hidden');
+  }else{btn.classList.add('hidden');currentSkip=null;}
+}
+function doSkip(){if(currentSkip){const v=document.getElementById('vp');if(v)v.currentTime=currentSkip.end;}}
 async function saveP(v){if(!v||!S.anime||!S.currentEp)return;const p=v.currentTime||0;if(p<2)return;await invoke('save_history',{id:S.anime.id,name:S.anime.name,episode:S.currentEp,mode:S.mode,progress:p}).catch(()=>{});if(S.anime.thumbnail||S.details?.thumbnail)invoke('set_history_thumbnail',{id:S.anime.id,mode:S.mode,thumbnail:S.anime.thumbnail||S.details?.thumbnail||''}).catch(()=>{});}
 
 // Keyboard shortcuts (YouTube-like)
@@ -465,7 +508,7 @@ function bc(){
   if(S.view==='library'&&!crumbs.find(c=>c[0]==='Library'))crumbs.push(['Library',null]);
   if(S.view==='bookmarks'&&!crumbs.find(c=>c[0]==='Bookmarks'))crumbs.push(['Bookmarks',null]);
   if(S.view==='downloads'&&!crumbs.find(c=>c[0]==='Downloads'))crumbs.push(['Downloads',null]);
-  return`<div class="breadcrumbs">${crumbs.map((c,i)=>i<crumbs.length-1?`<span onclick="${c[1]||''}">${c[0]}</span><span class="sep">›</span>`:`<span class="current">${c[0]}</span>`).join('')}</div>`;
+  return`<div class="breadcrumbs">${crumbs.map((c,i)=>i<crumbs.length-1?`<span onclick="${c[1]||''}">${esc(c[0])}</span><span class="sep">›</span>`:`<span class="current">${esc(c[0])}</span>`).join('')}</div>`;
 }
 
 function animate(){
@@ -509,19 +552,19 @@ function navToView(target){
   }
   // Fallback: just set view
   S.view=target;render();
-}async function doSearch(){S.query=document.getElementById('q')?.value?.trim()||S.query;if(!S.query&&!S.genre)return;document.getElementById('aclist')?.classList.remove('show');S.page=1;S.hasMore=false;S.results=[];S.view='search';render();await fetchResults();}
+}async function doSearch(){S.query=document.getElementById('q')?.value?.trim()||S.query;if(!S.query)return;document.getElementById('aclist')?.classList.remove('show');S.page=1;S.hasMore=true;S.results=[];S.view='search';render();await fetchResults();}
 
 async function fetchResults(){
   const st=document.getElementById('status');if(st)st.textContent='Searching...';S.loading=true;
-  if(S.page>1){const el=document.getElementById('results');if(el)el.insertAdjacentHTML('afterend','<div id="load-more" class="status-msg" style="padding:16px"><div class="lbar" style="width:120px;margin:0 auto"><div class="lfill" style="width:60%;animation:shimmer 1s infinite"></div></div></div>');}
   try{
-    let items=await invoke('search_anime',{query:S.query||'anime',mode:S.mode,country:S.country});
-    S.results=items;
+    const items=await invoke('search_anime',{query:S.query,mode:S.mode,country:S.country});
+    S.results=items;S.hasMore=false;
     renderCards();
     if(st)st.textContent=S.results.length?'':'No results.';
   }catch(e){if(st)st.textContent='Error: '+e;}
   S.loading=false;document.getElementById('load-more')?.remove();
 }
+window.addEventListener('scroll',()=>{if(navIndex>=0&&navHistory[navIndex])navHistory[navIndex].scrollY=window.scrollY;});
 async function getLinks(ep){S.currentEp=ep;S.links=[];transitionTo('loading',async()=>{S.view='loading';render();try{S.links=await invoke('get_episode_url',{showId:S.anime.id,episode:ep,mode:S.mode,quality:'best',title:S.anime.name||''});clearInterval(progAnim);S.view='player';render();}catch(e){clearInterval(progAnim);const t=document.getElementById('ptxt');if(t)t.textContent='Error: '+e;}});}
 
 // Library
@@ -532,20 +575,20 @@ async function loadLibrary(){
   const el=document.getElementById('lib-content');if(!el)return;
   if(!items.length){el.innerHTML='<div class="status-msg">Nothing here yet</div>';return;}
   const tags={watching:'eye',plan_to_watch:'clock',break:'pause',finished:'check-circle',dropped:'x-circle'};
-  el.innerHTML=`<ul class="list">${items.map(h=>`<li class="li" onclick="resumeH2('${h.id}','${h.mode}')">
+  el.innerHTML=`<ul class="list">${items.map(h=>`<li class="li" onclick="resumeH2(${js(h.id)},${js(h.mode)})">
     <div style="display:flex;align-items:center;gap:8px">
-      ${h.thumbnail?`<img src="${h.thumbnail}" style="width:36px;height:50px;object-fit:cover;border-radius:4px"/>`:''}
-      <div><span class="t">${h.name}</span><br><span style="font-size:9px;color:var(--text2)">Ep ${h.episode} · ${fmt(h.progress)} <i data-lucide="${tags[h.tag]||'circle'}" style="width:10px;height:10px;display:inline-block;vertical-align:middle"></i></span></div>
+      ${h.thumbnail?`<img src="${esc(h.thumbnail)}" style="width:36px;height:50px;object-fit:cover;border-radius:4px"/>`:''}
+      <div><span class="t">${esc(h.name)}</span><br><span style="font-size:9px;color:var(--text2)">Ep ${esc(h.episode)} · ${fmt(h.progress)} <i data-lucide="${tags[h.tag]||'circle'}" style="width:10px;height:10px;display:inline-block;vertical-align:middle"></i></span></div>
     </div>
     <div style="display:flex;gap:4px;align-items:center">
-      <select class="sinput" style="width:auto;padding:3px 6px;font-size:9px" onchange="setTag('${h.id}','${h.mode}',this.value)" onclick="event.stopPropagation()">
+      <select class="sinput" style="width:auto;padding:3px 6px;font-size:9px" onchange="setTag(${js(h.id)},${js(h.mode)},this.value)" onclick="event.stopPropagation()">
         <option value="watching" ${h.tag==='watching'?'selected':''}>Watching</option>
         <option value="plan_to_watch" ${h.tag==='plan_to_watch'?'selected':''}>Plan to Watch</option>
         <option value="break" ${h.tag==='break'?'selected':''}>On Break</option>
         <option value="finished" ${h.tag==='finished'?'selected':''}>Finished</option>
         <option value="dropped" ${h.tag==='dropped'?'selected':''}>Dropped</option>
       </select>
-      <span class="del" onclick="event.stopPropagation();delH2('${h.id}','${h.mode}')">✕</span>
+      <span class="del" onclick="event.stopPropagation();delH2(${js(h.id)},${js(h.mode)})">✕</span>
     </div>
   </li>`).join('')}</ul>`;
   if(window.lucide)try{lucide.createIcons();}catch(e){}
@@ -559,11 +602,11 @@ async function resumeH2(id,mode){const items=await invoke('get_history');const h
 async function showBookmarks(){S.bookmarks=await invoke('get_bookmarks');transitionTo('bookmarks',()=>{S.view='bookmarks';render();});}
 async function delBm(id){await invoke('delete_bookmark',{id});S.bookmarks=await invoke('get_bookmarks');render();}
 function loadBm(i){const b=S.bookmarks[i];S.query=b.query;S.mode=b.mode;S.country=b.country;S.sort=b.sort;doSearch();}
-function openSaveBookmark(){const q=document.getElementById('q')?.value||S.query;const o=document.createElement('div');o.className='modal-overlay';o.innerHTML=`<div class="modal"><h3>Save Bookmark</h3><input class="sinput" id="bmn" placeholder="Name..." value="${q} (${S.mode}/${S.country})"/><div class="modal-actions"><button class="btn bg" onclick="this.closest('.modal-overlay').remove()">Cancel</button><button class="btn bp" onclick="doSaveBm()">Save</button></div></div>`;document.body.appendChild(o);}
+function openSaveBookmark(){const q=document.getElementById('q')?.value||S.query;const o=document.createElement('div');o.className='modal-overlay';o.innerHTML=`<div class="modal"><h3>Save Bookmark</h3><input class="sinput" id="bmn" placeholder="Name..." value="${esc(q)} (${S.mode}/${S.country})"/><div class="modal-actions"><button class="btn bg" onclick="this.closest('.modal-overlay').remove()">Cancel</button><button class="btn bp" onclick="doSaveBm()">Save</button></div></div>`;document.body.appendChild(o);}
 async function doSaveBm(){const n=document.getElementById('bmn').value;await invoke('save_bookmark',{name:n,query:S.query,mode:S.mode,country:S.country,sort:S.sort});document.querySelector('.modal-overlay')?.remove();}
 
 // Debug
-async function debugSources(){const el=document.getElementById('status');if(el)el.innerHTML='Debugging...';try{const d=await invoke('debug_episode_url',{showId:S.anime.id,episode:S.currentEp,mode:S.mode});if(el)el.innerHTML=`<pre style="font-size:9px;color:var(--text2);background:var(--s1);padding:10px;border-radius:8px;overflow:auto;max-height:250px;text-align:left;white-space:pre-wrap">GET: ${d.get_url}\nLen: ${d.get_response_len}\nSnippet: ${d.get_response_snippet?.slice(0,200)}\nPOST fallback: ${d.used_post_fallback}\ntobeparsed: ${d.has_tobeparsed}\nSources: ${d.sources_count}\n${JSON.stringify(d.sources,null,1)}\nProviders: ${JSON.stringify(d.decoded_provider_ids,null,1)}\nLinks: ${JSON.stringify(d.links_per_provider,null,1)}</pre>`;}catch(e){if(el)el.textContent='Debug error: '+e;}}
+async function debugSources(){const el=document.getElementById('status');if(el)el.innerHTML='Debugging...';try{const d=await invoke('debug_episode_url',{showId:S.anime.id,episode:S.currentEp,mode:S.mode});if(el)el.innerHTML=`<pre style="font-size:9px;color:var(--text2);background:var(--s1);padding:10px;border-radius:8px;overflow:auto;max-height:250px;text-align:left;white-space:pre-wrap">${esc(`GET: ${d.get_url}\nLen: ${d.get_response_len}\nSnippet: ${d.get_response_snippet?.slice(0,200)}\nPOST fallback: ${d.used_post_fallback}\ntobeparsed: ${d.has_tobeparsed}\nSources: ${d.sources_count}\n${JSON.stringify(d.sources,null,1)}\nProviders: ${JSON.stringify(d.decoded_provider_ids,null,1)}\nLinks: ${JSON.stringify(d.links_per_provider,null,1)}`)}</pre>`;}catch(e){if(el)el.textContent='Debug error: '+e;}}
 
 // Downloads
 let bulkMode=false,selectedEps=new Set();
@@ -574,9 +617,9 @@ async function showDownloads(){transitionTo('downloads',()=>{S.view='downloads';
 async function playOffline(path){
   if(!path){alert('No file path');return;}
   try{
-    const url=await invoke('set_proxy_url',{url:'localfile:'+path,referrer:null});
+    const url=await invoke('local_url',{path});
     S.anime=S.anime||{id:'offline',name:'Downloaded'};
-    S.view='player';S.links=[{quality:'offline',url:url+'?t='+Date.now()}];S.currentEp='offline';S.episodes=[];render();
+    S.view='player';S.links=[{quality:'offline',url}];S.currentEp='offline';S.episodes=[];render();
   }catch(e){alert('Error: '+e);}
 }
 let dlRef=null;
@@ -585,14 +628,14 @@ async function refreshDownloads(){const items=await invoke('get_downloads');cons
   const groups={};items.forEach((d,idx)=>{d._idx=idx;if(!groups[d.anime_name])groups[d.anime_name]=[];groups[d.anime_name].push(d);});
   el.innerHTML=Object.entries(groups).map(([name,eps])=>`
     <div style="margin-bottom:12px">
-      <div class="slabel">${name}</div>
+      <div class="slabel">${esc(name)}</div>
       <ul class="list">${eps.map(d=>`<li class="li" style="padding:8px 12px;flex-direction:column;align-items:stretch;gap:4px">
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <span class="t">Ep ${d.episode}</span>
+          <span class="t">Ep ${esc(d.episode)}</span>
           <div style="display:flex;gap:4px;align-items:center">
             ${d.status==='Done'?`<button class="btn bp" style="padding:2px 8px;font-size:9px" onclick="playOffline(window._dlItems[${d._idx}].file_path)">▶</button>`:''}
-            ${d.status==='Downloading'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('cancel_download',{id:'${d.id}'})">Cancel</button>`:''}
-            ${d.status==='Done'||d.status==='Failed'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('remove_download',{id:'${d.id}'}).then(refreshDownloads)">✕</button>`:''}
+            ${d.status==='Downloading'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('cancel_download',{id:${js(d.id)}})">Cancel</button>`:''}
+            ${d.status==='Done'||d.status==='Failed'?`<button class="btn bg" style="padding:2px 6px;font-size:9px" onclick="invoke('remove_download',{id:${js(d.id)}}).then(refreshDownloads)">✕</button>`:''}
             <span class="m">${d.status}</span>
           </div>
         </div>
@@ -601,7 +644,7 @@ async function refreshDownloads(){const items=await invoke('get_downloads');cons
             <div style="flex:1;height:3px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:${d.progress}%;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .3s"></div></div>
             <span style="font-size:9px;color:var(--text2);white-space:nowrap">${Math.round(d.progress)}% · ${fmtBytes(d.downloaded_bytes)}/${fmtBytes(d.total_bytes)}</span>
           </div>`:''}
-        ${d.error?`<span style="font-size:9px;color:var(--accent2)">${d.error}</span>`:''}
+        ${d.error?`<span style="font-size:9px;color:var(--accent2)">${esc(d.error)}</span>`:''}
       </li>`).join('')}</ul>
     </div>`).join('');
   if(items.some(d=>d.status==='Downloading'||d.status==='Queued')){clearTimeout(dlRef);dlRef=setTimeout(refreshDownloads,1500);}}

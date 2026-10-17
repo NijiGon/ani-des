@@ -1,128 +1,186 @@
+use futures::StreamExt;
+use std::collections::HashMap;
+use std::io::SeekFrom;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::Duration;
+use tauri::State;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 const PROXY_PORT: u16 = 18293;
+const AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0";
+const DEFAULT_REFERER: &str = "https://allmanga.to";
 
+/// Local media server. Every request carries its own target and must present
+/// `token`, so a web page cannot read files or relay URLs through it.
 pub struct ProxyState {
-    pub current_url: Arc<Mutex<String>>,
-    pub referrer: Arc<Mutex<String>>,
+    token: String,
+    client: reqwest::Client,
 }
 
 impl ProxyState {
     pub fn new() -> Self {
-        Self {
-            current_url: Arc::new(Mutex::new(String::new())),
-            referrer: Arc::new(Mutex::new("https://allmanga.to".to_string())),
+        let bytes: [u8; 16] = rand::random();
+        let token = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15)).build().unwrap();
+        Self { token, client }
+    }
+}
+
+pub async fn start_proxy(state: Arc<ProxyState>) -> std::io::Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", PROXY_PORT)).await?;
+    loop {
+        if let Ok((stream, _)) = listener.accept().await {
+            let state = state.clone();
+            tokio::spawn(async move { handle(stream, state).await.ok(); });
         }
     }
 }
 
-pub async fn start_proxy(state: Arc<ProxyState>) {
-        use tokio::net::TcpListener;
-        use tokio::io::{AsyncWriteExt, AsyncReadExt};
-
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", PROXY_PORT)).await.unwrap();
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 8192];
-                    let n = stream.read(&mut buf).await.unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                    let url = state.current_url.lock().await.clone();
-                    let refr = state.referrer.lock().await.clone();
-
-                    if url.is_empty() {
-                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
-                        return;
-                    }
-
-                    // Parse Range header
-                    let range_start = req.lines()
-                        .find(|l| l.to_lowercase().starts_with("range:"))
-                        .and_then(|l| l.split("bytes=").nth(1))
-                        .and_then(|r| r.split('-').next())
-                        .and_then(|s| s.trim().parse::<u64>().ok());
-
-                    // Handle local files
-                    if url.starts_with("localfile:") || url.starts_with("file:///") {
-                        let file_path = if url.starts_with("localfile:") {
-                            url.strip_prefix("localfile:").unwrap_or("").to_string()
-                        } else {
-                            let p = url.strip_prefix("file:///").unwrap_or("");
-                            percent_encoding::percent_decode_str(p).decode_utf8_lossy().to_string()
-                        };
-                        match tokio::fs::File::open(&file_path).await {
-                            Ok(mut file) => {
-                                use tokio::io::AsyncReadExt;
-                                let total = tokio::fs::metadata(&file_path).await.map(|m| m.len()).unwrap_or(0);
-                                let (start, status) = if let Some(s) = range_start { (s, "206 Partial Content") } else { (0, "200 OK") };
-                                let remaining = total.saturating_sub(start);
-                                let mut header = format!("HTTP/1.1 {}\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n", status, remaining);
-                                if range_start.is_some() { header.push_str(&format!("Content-Range: bytes {}-{}/{}\r\n", start, total-1, total)); }
-                                header.push_str("\r\n");
-                                let _ = stream.write_all(header.as_bytes()).await;
-                                use tokio::io::AsyncSeekExt;
-                                if start > 0 { let _ = file.seek(std::io::SeekFrom::Start(start)).await; }
-                                let mut buf = vec![0u8; 65536];
-                                loop {
-                                    let n = file.read(&mut buf).await.unwrap_or(0);
-                                    if n == 0 { break; }
-                                    if stream.write_all(&buf[..n]).await.is_err() { break; }
-                                }
-                            }
-                            Err(_) => { let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await; }
-                        }
-                        return;
-                    }
-
-                    let client = reqwest::Client::builder().build().unwrap();
-                    let mut req_builder = client.get(&url)
-                        .header("Referer", &refr)
-                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0");
-
-                    if let Some(start) = range_start {
-                        req_builder = req_builder.header("Range", format!("bytes={}-", start));
-                    }
-
-                    match req_builder.send().await {
-                        Ok(resp) => {
-                            let status = resp.status().as_u16();
-                            let ct = resp.headers().get("content-type")
-                                .and_then(|v| v.to_str().ok()).unwrap_or("video/mp4").to_string();
-                            let cl = resp.headers().get("content-length")
-                                .and_then(|v| v.to_str().ok()).unwrap_or("0").to_string();
-                            let cr = resp.headers().get("content-range")
-                                .and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-                            let accept_ranges = resp.headers().get("accept-ranges")
-                                .and_then(|v| v.to_str().ok()).unwrap_or("bytes").to_string();
-
-                            let status_line = if status == 206 || range_start.is_some() { "206 Partial Content" } else { "200 OK" };
-                            let mut header = format!("HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n", status_line, ct, cl, accept_ranges);
-                            if let Some(cr) = cr { header.push_str(&format!("Content-Range: {}\r\n", cr)); }
-                            header.push_str("\r\n");
-
-                            let _ = stream.write_all(header.as_bytes()).await;
-
-                            use futures::StreamExt;
-                            let mut body = resp.bytes_stream();
-                            while let Some(Ok(chunk)) = body.next().await {
-                                if stream.write_all(&chunk).await.is_err() { break; }
-                            }
-                        }
-                        Err(_) => {
-                            let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n").await;
-                        }
-                    }
-                });
-            }
-        }
+fn parse_target(target: &str) -> (String, HashMap<String, String>) {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let params = query.split('&').filter_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        Some((k.to_string(), urlencoding::decode(v).ok()?.into_owned()))
+    }).collect();
+    (path.to_string(), params)
 }
 
+async fn respond(stream: &mut TcpStream, status: &str, headers: &[(&str, String)]) -> std::io::Result<()> {
+    let mut head = format!("HTTP/1.1 {}\r\nConnection: close\r\n", status);
+    for (k, v) in headers {
+        head.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes()).await
+}
+
+async fn handle(mut stream: TcpStream, state: Arc<ProxyState>) -> std::io::Result<()> {
+    let mut buf = vec![0u8; 8192];
+    let n = stream.read(&mut buf).await?;
+    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+    let mut parts = req.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let target = parts.next().unwrap_or("");
+    if method != "GET" {
+        return respond(&mut stream, "405 Method Not Allowed", &[("Content-Length", "0".into())]).await;
+    }
+
+    let (path, params) = parse_target(target);
+    if params.get("k").map(String::as_str) != Some(state.token.as_str()) {
+        return respond(&mut stream, "403 Forbidden", &[("Content-Length", "0".into())]).await;
+    }
+
+    let range_start = req.lines()
+        .find(|l| l.to_lowercase().starts_with("range:"))
+        .and_then(|l| l.split("bytes=").nth(1))
+        .and_then(|r| r.split('-').next())
+        .and_then(|s| s.trim().parse::<u64>().ok());
+
+    match path.as_str() {
+        "/video" => serve_remote(&mut stream, &state, &params, range_start).await,
+        "/local" => serve_local(&mut stream, &params, range_start).await,
+        _ => respond(&mut stream, "404 Not Found", &[("Content-Length", "0".into())]).await,
+    }
+}
+
+async fn serve_local(stream: &mut TcpStream, params: &HashMap<String, String>, range_start: Option<u64>) -> std::io::Result<()> {
+    let Some(p) = params.get("p") else {
+        return respond(stream, "400 Bad Request", &[("Content-Length", "0".into())]).await;
+    };
+    let Ok(path) = crate::downloads::resolve_download_file(p) else {
+        return respond(stream, "403 Forbidden", &[("Content-Length", "0".into())]).await;
+    };
+
+    let mut file = tokio::fs::File::open(&path).await?;
+    let total = file.metadata().await?.len();
+    let start = range_start.unwrap_or(0).min(total);
+    let mut headers = vec![
+        ("Content-Type", "video/mp4".to_string()),
+        ("Content-Length", (total - start).to_string()),
+        ("Accept-Ranges", "bytes".to_string()),
+    ];
+    let status = if range_start.is_some() {
+        headers.push(("Content-Range", format!("bytes {}-{}/{}", start, total.saturating_sub(1), total)));
+        "206 Partial Content"
+    } else {
+        "200 OK"
+    };
+    respond(stream, status, &headers).await?;
+
+    if start > 0 { file.seek(SeekFrom::Start(start)).await?; }
+    let mut buf = vec![0u8; 65536];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 || stream.write_all(&buf[..n]).await.is_err() { break; }
+    }
+    Ok(())
+}
+
+async fn serve_remote(stream: &mut TcpStream, state: &ProxyState, params: &HashMap<String, String>, range_start: Option<u64>) -> std::io::Result<()> {
+    let Some(url) = params.get("u").filter(|u| u.starts_with("https://") || u.starts_with("http://")) else {
+        return respond(stream, "400 Bad Request", &[("Content-Length", "0".into())]).await;
+    };
+    let referer = params.get("r").cloned().unwrap_or_else(|| DEFAULT_REFERER.to_string());
+
+    let mut req = state.client.get(url).header("Referer", referer).header("User-Agent", AGENT);
+    if let Some(start) = range_start {
+        req = req.header("Range", format!("bytes={}-", start));
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(_) => return respond(stream, "502 Bad Gateway", &[("Content-Length", "0".into())]).await,
+    };
+
+    let status = format!("{} {}", resp.status().as_u16(), resp.status().canonical_reason().unwrap_or(""));
+    let mut headers: Vec<(&str, String)> = Vec::new();
+    for name in ["Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"] {
+        if let Some(v) = resp.headers().get(name).and_then(|v| v.to_str().ok()) {
+            headers.push((name, v.to_string()));
+        }
+    }
+    respond(stream, &status, &headers).await?;
+
+    let mut body = resp.bytes_stream();
+    while let Some(Ok(chunk)) = body.next().await {
+        if stream.write_all(&chunk).await.is_err() { break; }
+    }
+    Ok(())
+}
+
+/// URL the video element should play for a remote stream.
 #[tauri::command]
-pub async fn set_proxy_url(url: String, referrer: Option<String>, state: tauri::State<'_, Arc<ProxyState>>) -> Result<String, String> {
-    *state.current_url.lock().await = url;
-    if let Some(r) = referrer { *state.referrer.lock().await = r; }
-    Ok(format!("http://127.0.0.1:{}/video", PROXY_PORT))
+pub fn proxy_url(url: String, referrer: Option<String>, state: State<'_, Arc<ProxyState>>) -> Result<String, String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http(s) URLs can be proxied".to_string());
+    }
+    let referrer = referrer.unwrap_or_else(|| DEFAULT_REFERER.to_string());
+    Ok(format!(
+        "http://127.0.0.1:{}/video?k={}&u={}&r={}",
+        PROXY_PORT, state.token, urlencoding::encode(&url), urlencoding::encode(&referrer)
+    ))
+}
+
+/// URL the video element should play for a downloaded file.
+#[tauri::command]
+pub fn local_url(path: String, state: State<'_, Arc<ProxyState>>) -> Result<String, String> {
+    let file = crate::downloads::resolve_download_file(&path)?;
+    Ok(format!(
+        "http://127.0.0.1:{}/local?k={}&p={}",
+        PROXY_PORT, state.token, urlencoding::encode(&file.to_string_lossy())
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_target;
+
+    #[test]
+    fn parses_path_and_decoded_params() {
+        let (path, params) = parse_target("/video?k=abc&u=https%3A%2F%2Fx.com%2Fa%20b.mp4&r=");
+        assert_eq!(path, "/video");
+        assert_eq!(params.get("k").map(String::as_str), Some("abc"));
+        assert_eq!(params.get("u").map(String::as_str), Some("https://x.com/a b.mp4"));
+        assert_eq!(params.get("r").map(String::as_str), Some(""));
+    }
 }
